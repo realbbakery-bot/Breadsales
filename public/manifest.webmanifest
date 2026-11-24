@@ -1,0 +1,9 @@
+{
+  "name": "Bakery Dashboard",
+  "short_name": "Bakery",
+  "start_url": "/admin",
+  "display": "standalone",
+  "background_color": "#fbf5ec",
+  "theme_color": "#8a5a2b",
+  "icons": [{ "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}
