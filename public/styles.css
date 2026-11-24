@@ -320,3 +320,29 @@ html[dir='rtl'] input[dir='ltr'] { text-align: right; }
 
 .nowrap { flex-wrap: nowrap; }
 @media (max-width: 520px) { .hide-sm { display: none; } .lang-btn { min-width: 0; } }
+
+/* bake day picker */
+.day-chips { display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 8px; scrollbar-width: none; }
+.day-chips::-webkit-scrollbar { display: none; }
+.day-chip {
+  flex: none; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: start;
+  min-width: 190px; padding: 12px 16px; border-radius: var(--radius); cursor: pointer;
+  border: 2px solid var(--line); background: var(--surface); box-shadow: var(--shadow);
+  transition: border-color .15s, background .15s;
+}
+.day-chip[aria-checked='true'] { border-color: var(--terra); background: var(--wheat-soft); }
+.day-chip-date { font-weight: 700; font-size: 1.02rem; }
+.day-chip-cut { font-size: .8rem; color: var(--muted); }
+.cap-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px dashed var(--line); }
+.cap-row:last-child { border-bottom: 0; }
+.cap-row .prod-info { flex: 1; min-width: 0; }
+.bar { height: 8px; border-radius: 8px; background: var(--bg-2); overflow: hidden; margin-top: 6px; }
+.bar > span { display: block; height: 100%; background: var(--terra); border-radius: 8px; }
+.bake-card { cursor: pointer; }
+.bake-card:hover { border-color: var(--wheat); }
+.pill-open { background: var(--sage-soft); color: var(--sage); }
+.pill-cutoff { background: var(--wheat); color: #3a2a0a; }
+.pill-closed { background: var(--danger-soft); color: var(--danger); }
+.pill-past { background: var(--bg-2); color: var(--muted); }
+.select-inline { width: auto; min-height: 40px; padding: 6px 10px; max-width: 100%; }
+@media (max-width: 560px) { .cap-row { flex-wrap: wrap; } .cap-row .prod-stock { width: auto; margin-inline-start: auto; } }

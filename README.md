@@ -2,12 +2,17 @@
 
 A small, bilingual (formal Arabic / English) web app for home and micro bakers.
 
-- **Customers** open one link (share it on Instagram / WhatsApp). They see what is in stock, pick items, choose a pickup date and reserve. No app install and no account needed.
-- **Stock is deducted automatically** when an order is placed. This happens inside a database transaction, so two customers can never both buy the last loaf.
-- **Bakers** use a phone-friendly dashboard at `/admin` to:
-  - see today's orders and what to hand over
-  - mark orders *ready* or *picked up*, or cancel them (cancelling puts the items back into stock)
-  - adjust stock with +/− buttons, add items with photos, and open or close the shop with one switch
+Built for bakers who bake **once or twice a week** (artisan sourdough and similar).
+
+- **Bake days.** The baker plans each bake: the date, when orders close (for example the evening before, so they know the count before building the levain), and how many of each item they will bake. A new bake day is pre-filled from the last one, one week later with the same quantities.
+- **Customers** open one link (share it on Instagram / WhatsApp). They pick a bake day, see what is left for it, and reserve. No app install and no account needed.
+- **Inventory updates automatically.** Each order reserves from that bake day's quantities. The check and the reservation happen inside a single database transaction, so a bake can never be oversold. Cancelling an order frees its items. Raising a quantity takes effect immediately. A quantity can't be lowered below what is already reserved.
+- **Bakers** use a phone-friendly dashboard at `/admin`:
+  - **Bake sheet:** what to bake for a given day, sales, and how full each item is
+  - **Bake days:** plan a bake, pause one, see each bake's orders
+  - **Orders:** mark *ready* or *picked up*, cancel, WhatsApp or call the customer
+  - **Menu:** items with photos, prices, a usual quantity per bake, and an optional per-order limit
+  - **Settings:** default order cutoff, shop on/off switch, currency, WhatsApp
 - After ordering, the customer can **send the order to the baker on WhatsApp** in one tap. The baker can message or call any customer from the order card.
 
 ## Run it
@@ -18,8 +23,8 @@ Requires **Node.js 22.13 or newer**. There are no other dependencies and nothing
 ADMIN_PASSWORD='choose-a-strong-one' npm start
 # Shop:      http://localhost:3000/
 # Dashboard: http://localhost:3000/admin
-npm run seed   # optional: adds 5 sample products
-npm test       # 15 tests: stock deduction, no overselling, restocking, auth
+npm run seed   # optional: sample sourdough menu + 2 bake days
+npm test       # 19 tests: reservations, no overselling, cutoffs, cancel, auth
 ```
 
 If you start without `ADMIN_PASSWORD`, the server prints a one-time **setup code** in its log. Enter that code at `/admin` to create a password.
@@ -53,6 +58,11 @@ Point `DATA_DIR` at the persistent disk. Free tiers that wipe the disk on every 
 - **No online payment.** Orders are reservations, paid on pickup. Fake or no-show orders are possible. Limits in place:
   - 10 orders per hour per connection
   - an optional "max per order" for each item
-  - cancelling an order returns its items to stock
-- **One stock pool per item, not per bake day.** This suits a "drop" model: bake on Friday, set the stock, sell out. If you take pre-orders for several different bake days at once, you need per-day stock. That is the next feature to add.
+  - cancelling an order frees its items
+  - order cutoffs
+
+  A deposit through a payment provider is the real fix if no-shows become a problem.
+- **Bake days are created by hand** (pre-filled, so it is a few taps). Fully automatic recurring schedules are not built.
+- **No automatic notifications.** The baker sees new orders in the dashboard. Customers message the baker on WhatsApp in one tap.
 - One bakery per installation. It is not a multi-baker marketplace.
+- The database format changed when bake days were added. An install from the earlier version must start with an empty `DATA_DIR`.

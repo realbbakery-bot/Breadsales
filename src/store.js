@@ -1,5 +1,9 @@
-// Data layer: products, orders, settings. All inventory changes happen here,
-// inside SQLite transactions, so stock can never go below zero.
+// Data layer. The model fits weekly / twice-weekly bakers:
+//   products  = the catalog (names, price, photo)
+//   bake days = a date + an order cutoff + how many of each item will be baked (capacity)
+//   orders    = reserve from one bake day; remaining = capacity − reserved (non-cancelled)
+// Orders are checked and inserted inside one IMMEDIATE transaction, so a bake day can
+// never be oversold.
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -14,6 +18,7 @@ export class AppError extends Error {
   }
 }
 
+const SCHEMA_VERSION = 2;
 const SCHEMA = `
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS settings (
@@ -27,7 +32,7 @@ CREATE TABLE IF NOT EXISTS products (
   desc_en       TEXT NOT NULL DEFAULT '',
   desc_ar       TEXT NOT NULL DEFAULT '',
   price_milli   INTEGER NOT NULL CHECK (price_milli >= 0),
-  stock         INTEGER NOT NULL DEFAULT 0 CHECK (stock >= 0),
+  default_qty   INTEGER NOT NULL DEFAULT 0 CHECK (default_qty >= 0),
   max_per_order INTEGER,
   emoji         TEXT NOT NULL DEFAULT '🍞',
   image_url     TEXT NOT NULL DEFAULT '',
@@ -35,9 +40,25 @@ CREATE TABLE IF NOT EXISTS products (
   sort          INTEGER NOT NULL DEFAULT 0,
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS bake_days (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  date       TEXT NOT NULL UNIQUE,          -- YYYY-MM-DD (bake & pickup day)
+  cutoff_at  TEXT,                          -- YYYY-MM-DDTHH:MM local time; orders close after this
+  note_en    TEXT NOT NULL DEFAULT '',
+  note_ar    TEXT NOT NULL DEFAULT '',
+  is_open    INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS bake_items (
+  bake_day_id INTEGER NOT NULL REFERENCES bake_days(id) ON DELETE CASCADE,
+  product_id  INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  capacity    INTEGER NOT NULL CHECK (capacity >= 0),
+  PRIMARY KEY (bake_day_id, product_id)
+);
 CREATE TABLE IF NOT EXISTS orders (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   code          TEXT NOT NULL UNIQUE,
+  bake_day_id   INTEGER NOT NULL REFERENCES bake_days(id),
   customer_name TEXT NOT NULL,
   phone         TEXT NOT NULL,
   pickup_date   TEXT NOT NULL,
@@ -48,7 +69,7 @@ CREATE TABLE IF NOT EXISTS orders (
   created_at    TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE INDEX IF NOT EXISTS idx_orders_pickup ON orders(pickup_date);
+CREATE INDEX IF NOT EXISTS idx_orders_bake_day ON orders(bake_day_id);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE TABLE IF NOT EXISTS order_items (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,6 +80,7 @@ CREATE TABLE IF NOT EXISTS order_items (
   unit_price_milli INTEGER NOT NULL,
   qty              INTEGER NOT NULL CHECK (qty > 0)
 );
+CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);
 CREATE TABLE IF NOT EXISTS sessions (
   token      TEXT PRIMARY KEY,
   expires_at INTEGER NOT NULL
@@ -68,18 +90,18 @@ CREATE TABLE IF NOT EXISTS sessions (
 export const DEFAULT_SETTINGS = {
   shop_name_en: 'My Home Bakery',
   shop_name_ar: 'مخبزي المنزلي',
-  tagline_en: 'Freshly baked with love, every day.',
-  tagline_ar: 'مخبوزات طازجة تُعدّ بعناية كل يوم.',
-  pickup_info_en: 'Pick up from our home kitchen. We will contact you to confirm.',
-  pickup_info_ar: 'يُستلم الطلب من مطبخنا المنزلي، وسنتواصل معكم للتأكيد.',
+  tagline_en: 'Naturally leavened sourdough, baked to order.',
+  tagline_ar: 'خبز العجين المخمّر طبيعيًا، يُخبز حسب الطلب.',
+  pickup_info_en: 'Pick up from our home kitchen on bake day. We will contact you to confirm.',
+  pickup_info_ar: 'يُستلم الطلب من مطبخنا المنزلي في يوم الخَبز، وسنتواصل معكم للتأكيد.',
   currency_en: 'SAR',
   currency_ar: 'ر.س',
   decimals: '2',
   whatsapp: '',
   country_code: '966',
   shop_open: '1',
-  lead_days: '0',
-  max_days_ahead: '14',
+  cutoff_days_before: '1',
+  cutoff_time: '20:00',
 };
 
 const PUBLIC_SETTING_KEYS = Object.keys(DEFAULT_SETTINGS);
@@ -90,7 +112,7 @@ const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
 
 export function toMilli(v) {
   const n = typeof v === 'number' ? v : Number(String(v ?? '').replace(',', '.'));
-  if (!Number.isFinite(n) || n < 0 || n > 1e7) throw new AppError('invalid_price');
+  if (String(v ?? '').trim() === '' || !Number.isFinite(n) || n < 0 || n > 1e7) throw new AppError('invalid_price');
   return Math.round(n * 1000);
 }
 
@@ -101,29 +123,29 @@ function intOr(v, fallback, { min = -Infinity, max = Infinity } = {}) {
   return n;
 }
 
+const pad = (n) => String(n).padStart(2, '0');
 export function localDate(d = new Date()) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
-
-function addDays(dateStr, n) {
+export function localDateTime(d = new Date()) {
+  return `${localDate(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+export function addDays(dateStr, n) {
   const [y, m, d] = dateStr.split('-').map(Number);
   return localDate(new Date(y, m - 1, d + n));
 }
+const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(s));
+const isDateTime = (s) => /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(s);
 
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 function makeCode() {
-  const bytes = crypto.randomBytes(6);
   let s = '';
-  for (const b of bytes) s += CODE_ALPHABET[b % CODE_ALPHABET.length];
+  for (const b of crypto.randomBytes(6)) s += CODE_ALPHABET[b % CODE_ALPHABET.length];
   return s;
 }
 
 function normalizePhone(p) {
   const cleaned = str(p, 30).replace(/[\s\-().]/g, '');
-  // Accept Arabic-Indic digits too.
   const western = cleaned.replace(/[٠-٩]/g, (c) => String(c.charCodeAt(0) - 0x0660));
   if (!/^\+?\d{6,15}$/.test(western)) throw new AppError('invalid_phone');
   return western;
@@ -137,7 +159,7 @@ function productRow(p) {
     desc_en: p.desc_en,
     desc_ar: p.desc_ar,
     price: p.price_milli / 1000,
-    stock: p.stock,
+    default_qty: p.default_qty,
     max_per_order: p.max_per_order,
     emoji: p.emoji,
     image_url: p.image_url,
@@ -147,11 +169,18 @@ function productRow(p) {
 }
 
 // ---------- store ----------
-export function openStore(file = ':memory:') {
+export function openStore(file = ':memory:', { now = () => new Date() } = {}) {
   if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
   if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL;');
+
+  const version = db.prepare('PRAGMA user_version').get().user_version;
+  const hasTables = db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'products'").get();
+  if (hasTables && version < SCHEMA_VERSION) {
+    throw new Error(`Database ${file} uses an older format (v${version}). Start with an empty DATA_DIR.`);
+  }
   db.exec(SCHEMA);
+  db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 
   const insertSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
   for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) insertSetting.run(k, v);
@@ -169,9 +198,7 @@ export function openStore(file = ':memory:') {
   }
 
   // ----- settings -----
-  function getSetting(key) {
-    return db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value;
-  }
+  const getSetting = (key) => db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value;
   function setSetting(key, value) {
     db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
       .run(key, String(value));
@@ -187,16 +214,18 @@ export function openStore(file = ':memory:') {
       pickup_info_en: 500, pickup_info_ar: 500, currency_en: 10, currency_ar: 10,
     };
     tx(() => {
-      for (const [k, max] of Object.entries(limits)) {
-        if (k in input) setSetting(k, str(input[k], max));
-      }
+      for (const [k, max] of Object.entries(limits)) if (k in input) setSetting(k, str(input[k], max));
       if ('decimals' in input) setSetting('decimals', intOr(input.decimals, 2, { min: 0, max: 3 }));
-      if ('lead_days' in input) setSetting('lead_days', intOr(input.lead_days, 0, { min: 0, max: 30 }));
-      if ('max_days_ahead' in input) setSetting('max_days_ahead', intOr(input.max_days_ahead, 14, { min: 0, max: 90 }));
+      if ('cutoff_days_before' in input) setSetting('cutoff_days_before', intOr(input.cutoff_days_before, 1, { min: 0, max: 14 }));
+      if ('cutoff_time' in input) {
+        const tm = str(input.cutoff_time, 5);
+        if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(tm)) throw new AppError('invalid_time');
+        setSetting('cutoff_time', tm);
+      }
       if ('shop_open' in input) setSetting('shop_open', input.shop_open ? '1' : '0');
       if ('country_code' in input) {
         const cc = str(input.country_code, 6).replace(/[^\d]/g, '');
-        if (cc && cc.length > 4) throw new AppError('invalid_number');
+        if (cc.length > 4) throw new AppError('invalid_number');
         setSetting('country_code', cc);
       }
       if ('whatsapp' in input) {
@@ -208,41 +237,31 @@ export function openStore(file = ':memory:') {
     return getSettings();
   }
 
-  function pickupWindow() {
-    const s = getSettings();
-    const today = localDate();
-    const lead = Number(s.lead_days) || 0;
-    const ahead = Math.max(lead, Number(s.max_days_ahead) || 0);
-    return { today, min: addDays(today, lead), max: addDays(today, ahead) };
-  }
-
-  // ----- products -----
+  // ----- products (catalog) -----
   function listProducts({ includeInactive = false } = {}) {
-    const rows = db.prepare(
+    return db.prepare(
       `SELECT * FROM products ${includeInactive ? '' : 'WHERE active = 1'} ORDER BY sort ASC, id ASC`
-    ).all();
-    return rows.map(productRow);
+    ).all().map(productRow);
   }
   function getProduct(id) {
     const p = db.prepare('SELECT * FROM products WHERE id = ?').get(id);
     if (!p) throw new AppError('product_not_found', 404);
     return productRow(p);
   }
-  function productFields(input, existing) {
+  function productFields(input, ex) {
+    const has = (k) => k in input;
     const f = {
-      name_en: 'name_en' in input ? str(input.name_en, 80) : existing?.name_en ?? '',
-      name_ar: 'name_ar' in input ? str(input.name_ar, 80) : existing?.name_ar ?? '',
-      desc_en: 'desc_en' in input ? str(input.desc_en, 400) : existing?.desc_en ?? '',
-      desc_ar: 'desc_ar' in input ? str(input.desc_ar, 400) : existing?.desc_ar ?? '',
-      price_milli: 'price' in input ? toMilli(input.price) : existing ? Math.round(existing.price * 1000) : 0,
-      stock: 'stock' in input ? intOr(input.stock, 0, { min: 0, max: 100000 }) : existing?.stock ?? 0,
-      max_per_order: 'max_per_order' in input
-        ? intOr(input.max_per_order, null, { min: 1, max: 1000 })
-        : existing?.max_per_order ?? null,
-      emoji: 'emoji' in input ? str(input.emoji, 8) || '🍞' : existing?.emoji ?? '🍞',
-      image_url: 'image_url' in input ? str(input.image_url, 300) : existing?.image_url ?? '',
-      active: 'active' in input ? (input.active ? 1 : 0) : existing ? (existing.active ? 1 : 0) : 1,
-      sort: 'sort' in input ? intOr(input.sort, 0, { min: -10000, max: 10000 }) : existing?.sort ?? 0,
+      name_en: has('name_en') ? str(input.name_en, 80) : ex?.name_en ?? '',
+      name_ar: has('name_ar') ? str(input.name_ar, 80) : ex?.name_ar ?? '',
+      desc_en: has('desc_en') ? str(input.desc_en, 400) : ex?.desc_en ?? '',
+      desc_ar: has('desc_ar') ? str(input.desc_ar, 400) : ex?.desc_ar ?? '',
+      price_milli: has('price') ? toMilli(input.price) : Math.round((ex?.price ?? 0) * 1000),
+      default_qty: has('default_qty') ? intOr(input.default_qty, 0, { min: 0, max: 10000 }) : ex?.default_qty ?? 0,
+      max_per_order: has('max_per_order') ? intOr(input.max_per_order, null, { min: 1, max: 1000 }) : ex?.max_per_order ?? null,
+      emoji: has('emoji') ? str(input.emoji, 8) || '🍞' : ex?.emoji ?? '🍞',
+      image_url: has('image_url') ? str(input.image_url, 300) : ex?.image_url ?? '',
+      active: has('active') ? (input.active ? 1 : 0) : ex ? (ex.active ? 1 : 0) : 1,
+      sort: has('sort') ? intOr(input.sort, 0, { min: -10000, max: 10000 }) : ex?.sort ?? 0,
     };
     if (!f.name_en && !f.name_ar) throw new AppError('name_required');
     if (f.image_url && !/^(\/uploads\/[\w.-]+|https:\/\/\S+)$/.test(f.image_url)) throw new AppError('invalid_image');
@@ -252,29 +271,17 @@ export function openStore(file = ':memory:') {
     if (!('price' in input)) throw new AppError('invalid_price');
     const f = productFields(input, null);
     const r = db.prepare(
-      `INSERT INTO products (name_en, name_ar, desc_en, desc_ar, price_milli, stock, max_per_order, emoji, image_url, active, sort)
+      `INSERT INTO products (name_en, name_ar, desc_en, desc_ar, price_milli, default_qty, max_per_order, emoji, image_url, active, sort)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(f.name_en, f.name_ar, f.desc_en, f.desc_ar, f.price_milli, f.stock, f.max_per_order, f.emoji, f.image_url, f.active, f.sort);
+    ).run(f.name_en, f.name_ar, f.desc_en, f.desc_ar, f.price_milli, f.default_qty, f.max_per_order, f.emoji, f.image_url, f.active, f.sort);
     return getProduct(Number(r.lastInsertRowid));
   }
   function updateProduct(id, input = {}) {
-    const existing = getProduct(id);
-    const f = productFields(input, existing);
+    const f = productFields(input, getProduct(id));
     db.prepare(
-      `UPDATE products SET name_en=?, name_ar=?, desc_en=?, desc_ar=?, price_milli=?, stock=?, max_per_order=?,
+      `UPDATE products SET name_en=?, name_ar=?, desc_en=?, desc_ar=?, price_milli=?, default_qty=?, max_per_order=?,
        emoji=?, image_url=?, active=?, sort=? WHERE id=?`
-    ).run(f.name_en, f.name_ar, f.desc_en, f.desc_ar, f.price_milli, f.stock, f.max_per_order, f.emoji, f.image_url, f.active, f.sort, id);
-    return getProduct(id);
-  }
-  function adjustStock(id, { delta, set } = {}) {
-    getProduct(id);
-    if (set !== undefined) {
-      const n = intOr(set, 0, { min: 0, max: 100000 });
-      db.prepare('UPDATE products SET stock = ? WHERE id = ?').run(n, id);
-    } else {
-      const d = intOr(delta, 0, { min: -100000, max: 100000 });
-      db.prepare('UPDATE products SET stock = MAX(0, stock + ?) WHERE id = ?').run(d, id);
-    }
+    ).run(f.name_en, f.name_ar, f.desc_en, f.desc_ar, f.price_milli, f.default_qty, f.max_per_order, f.emoji, f.image_url, f.active, f.sort, id);
     return getProduct(id);
   }
   function deleteProduct(id) {
@@ -282,29 +289,165 @@ export function openStore(file = ':memory:') {
     db.prepare('DELETE FROM products WHERE id = ?').run(id);
   }
 
+  // ----- bake days -----
+  const reservedStmt = db.prepare(
+    `SELECT COALESCE(SUM(oi.qty), 0) AS n FROM order_items oi JOIN orders o ON o.id = oi.order_id
+      WHERE o.bake_day_id = ? AND oi.product_id = ? AND o.status != 'cancelled'`
+  );
+  const reserved = (bakeDayId, productId) => Number(reservedStmt.get(bakeDayId, productId).n);
+
+  function bakeDayState(b) {
+    const nowStr = localDateTime(now());
+    if (b.date < localDate(now())) return 'past';
+    if (!b.is_open) return 'closed';
+    if (b.cutoff_at && nowStr >= b.cutoff_at) return 'cutoff';
+    return 'open';
+  }
+
+  function hydrateBakeDay(b) {
+    const items = db.prepare(
+      `SELECT bi.product_id, bi.capacity, p.name_en, p.name_ar, p.emoji, p.image_url, p.active, p.sort
+         FROM bake_items bi JOIN products p ON p.id = bi.product_id
+        WHERE bi.bake_day_id = ? ORDER BY p.sort, p.id`
+    ).all(b.id).map((i) => {
+      const r = reserved(b.id, i.product_id);
+      return {
+        product_id: i.product_id, name_en: i.name_en, name_ar: i.name_ar, emoji: i.emoji, image_url: i.image_url,
+        active: !!i.active, capacity: i.capacity, reserved: r, remaining: Math.max(0, i.capacity - r),
+      };
+    });
+    const counts = db.prepare(
+      `SELECT COUNT(*) FILTER (WHERE status != 'cancelled') AS orders,
+              COUNT(*) FILTER (WHERE status = 'new') AS new_orders
+         FROM orders WHERE bake_day_id = ?`
+    ).get(b.id);
+    return {
+      id: b.id, date: b.date, cutoff_at: b.cutoff_at, note_en: b.note_en, note_ar: b.note_ar,
+      is_open: !!b.is_open, state: bakeDayState(b), items,
+      order_count: Number(counts.orders), new_count: Number(counts.new_orders),
+    };
+  }
+
+  function getBakeDay(id) {
+    const b = db.prepare('SELECT * FROM bake_days WHERE id = ?').get(id);
+    if (!b) throw new AppError('bake_day_not_found', 404);
+    return hydrateBakeDay(b);
+  }
+
+  function listBakeDays({ scope = 'upcoming' } = {}) {
+    const today = localDate(now());
+    const rows = scope === 'all'
+      ? db.prepare('SELECT * FROM bake_days ORDER BY date DESC LIMIT 60').all()
+      : db.prepare('SELECT * FROM bake_days WHERE date >= ? ORDER BY date ASC').all(today);
+    return rows.map(hydrateBakeDay);
+  }
+
+  // What customers see: open bake days with remaining quantities for active products.
+  function publicBakeDays() {
+    return listBakeDays().filter((b) => b.state === 'open').map((b) => ({
+      id: b.id, date: b.date, cutoff_at: b.cutoff_at, note_en: b.note_en, note_ar: b.note_ar,
+      items: b.items.filter((i) => i.active && i.capacity > 0).map((i) => ({ product_id: i.product_id, remaining: i.remaining })),
+    }));
+  }
+
+  function defaultCutoff(date) {
+    const s = getSettings();
+    return `${addDays(date, -Number(s.cutoff_days_before || 0))}T${s.cutoff_time || '20:00'}`;
+  }
+
+  // Pre-filled form for a new bake day: a week after the latest one, same quantities.
+  function bakeDayTemplate() {
+    const last = db.prepare('SELECT * FROM bake_days ORDER BY date DESC LIMIT 1').get();
+    const today = localDate(now());
+    let date = last ? addDays(last.date, 7) : addDays(today, 2);
+    while (date < today || db.prepare('SELECT 1 FROM bake_days WHERE date = ?').get(date)) date = addDays(date, 7);
+    const lastItems = last
+      ? new Map(db.prepare('SELECT product_id, capacity FROM bake_items WHERE bake_day_id = ?').all(last.id).map((r) => [r.product_id, r.capacity]))
+      : null;
+    return {
+      date,
+      cutoff_at: defaultCutoff(date),
+      note_en: '', note_ar: '', is_open: true,
+      items: listProducts().map((p) => ({ product_id: p.id, capacity: lastItems?.get(p.id) ?? p.default_qty })),
+    };
+  }
+
+  function bakeDayFields(input, existing) {
+    const date = 'date' in input ? str(input.date, 10) : existing?.date;
+    if (!date || !isDate(date)) throw new AppError('invalid_date');
+    let cutoff_at = 'cutoff_at' in input ? str(input.cutoff_at, 16) || null : existing?.cutoff_at ?? defaultCutoff(date);
+    if (cutoff_at && !isDateTime(cutoff_at)) throw new AppError('invalid_cutoff');
+    if (cutoff_at && cutoff_at > `${date}T23:59`) throw new AppError('cutoff_after_bake_day');
+    return {
+      date, cutoff_at,
+      note_en: 'note_en' in input ? str(input.note_en, 300) : existing?.note_en ?? '',
+      note_ar: 'note_ar' in input ? str(input.note_ar, 300) : existing?.note_ar ?? '',
+      is_open: 'is_open' in input ? (input.is_open ? 1 : 0) : existing ? (existing.is_open ? 1 : 0) : 1,
+    };
+  }
+
+  function saveBakeItems(bakeDayId, items) {
+    if (!Array.isArray(items)) return;
+    const upsert = db.prepare(
+      `INSERT INTO bake_items (bake_day_id, product_id, capacity) VALUES (?, ?, ?)
+       ON CONFLICT(bake_day_id, product_id) DO UPDATE SET capacity = excluded.capacity`
+    );
+    for (const it of items) {
+      const pid = Number(it?.product_id);
+      const cap = intOr(it?.capacity, 0, { min: 0, max: 10000 });
+      if (!db.prepare('SELECT 1 FROM products WHERE id = ?').get(pid)) throw new AppError('product_not_found', 404);
+      const r = reserved(bakeDayId, pid);
+      if (cap < r) {
+        const p = getProduct(pid);
+        throw new AppError('capacity_below_reserved', 409, { reserved: r, name_en: p.name_en, name_ar: p.name_ar });
+      }
+      upsert.run(bakeDayId, pid, cap);
+    }
+  }
+
+  function createBakeDay(input = {}) {
+    const f = bakeDayFields(input, null);
+    return tx(() => {
+      if (db.prepare('SELECT 1 FROM bake_days WHERE date = ?').get(f.date)) throw new AppError('bake_day_exists', 409);
+      const r = db.prepare('INSERT INTO bake_days (date, cutoff_at, note_en, note_ar, is_open) VALUES (?, ?, ?, ?, ?)')
+        .run(f.date, f.cutoff_at, f.note_en, f.note_ar, f.is_open);
+      const id = Number(r.lastInsertRowid);
+      saveBakeItems(id, input.items);
+      return getBakeDay(id);
+    });
+  }
+
+  function updateBakeDay(id, input = {}) {
+    const existing = getBakeDay(id);
+    const f = bakeDayFields(input, existing);
+    return tx(() => {
+      if (f.date !== existing.date) {
+        if (existing.order_count > 0) throw new AppError('bake_day_has_orders', 409);
+        if (db.prepare('SELECT 1 FROM bake_days WHERE date = ? AND id != ?').get(f.date, id)) throw new AppError('bake_day_exists', 409);
+      }
+      db.prepare('UPDATE bake_days SET date=?, cutoff_at=?, note_en=?, note_ar=?, is_open=? WHERE id=?')
+        .run(f.date, f.cutoff_at, f.note_en, f.note_ar, f.is_open, id);
+      saveBakeItems(id, input.items);
+      return getBakeDay(id);
+    });
+  }
+
+  function deleteBakeDay(id) {
+    getBakeDay(id);
+    if (db.prepare('SELECT 1 FROM orders WHERE bake_day_id = ?').get(id)) throw new AppError('bake_day_has_orders', 409);
+    db.prepare('DELETE FROM bake_days WHERE id = ?').run(id);
+  }
+
   // ----- orders -----
   function hydrateOrder(o) {
     if (!o) return null;
     const items = db.prepare('SELECT * FROM order_items WHERE order_id = ? ORDER BY id').all(o.id).map((i) => ({
-      product_id: i.product_id,
-      name_en: i.name_en,
-      name_ar: i.name_ar,
-      unit_price: i.unit_price_milli / 1000,
-      qty: i.qty,
+      product_id: i.product_id, name_en: i.name_en, name_ar: i.name_ar, unit_price: i.unit_price_milli / 1000, qty: i.qty,
     }));
     return {
-      id: o.id,
-      code: o.code,
-      customer_name: o.customer_name,
-      phone: o.phone,
-      pickup_date: o.pickup_date,
-      notes: o.notes,
-      status: o.status,
-      total: o.total_milli / 1000,
-      lang: o.lang,
-      created_at: o.created_at,
-      updated_at: o.updated_at,
-      items,
+      id: o.id, code: o.code, bake_day_id: o.bake_day_id, customer_name: o.customer_name, phone: o.phone,
+      pickup_date: o.pickup_date, notes: o.notes, status: o.status, total: o.total_milli / 1000, lang: o.lang,
+      created_at: o.created_at, updated_at: o.updated_at, items,
     };
   }
 
@@ -316,11 +459,8 @@ export function openStore(file = ':memory:') {
     const phone = normalizePhone(input.phone);
     const notes = str(input.notes, 500);
     const lang = input.lang === 'ar' ? 'ar' : 'en';
-
-    const pickup_date = str(input.pickup_date, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(pickup_date)) throw new AppError('invalid_pickup_date');
-    const win = pickupWindow();
-    if (pickup_date < win.min || pickup_date > win.max) throw new AppError('invalid_pickup_date', 400, win);
+    const bakeDayId = Number(input.bake_day_id);
+    if (!Number.isInteger(bakeDayId)) throw new AppError('bake_day_not_found', 404);
 
     if (!Array.isArray(input.items) || input.items.length === 0) throw new AppError('empty_order');
     if (input.items.length > 50) throw new AppError('too_many_items');
@@ -333,34 +473,38 @@ export function openStore(file = ':memory:') {
     }
 
     return tx(() => {
-      const getP = db.prepare('SELECT * FROM products WHERE id = ? AND active = 1');
-      const take = db.prepare('UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?');
+      const b = db.prepare('SELECT * FROM bake_days WHERE id = ?').get(bakeDayId);
+      if (!b) throw new AppError('bake_day_not_found', 404);
+      const st = bakeDayState(b);
+      if (st !== 'open') throw new AppError(st === 'cutoff' ? 'orders_closed_for_day' : 'bake_day_unavailable', 409);
+
+      const getLine = db.prepare(
+        `SELECT p.*, bi.capacity FROM products p JOIN bake_items bi ON bi.product_id = p.id
+          WHERE p.id = ? AND bi.bake_day_id = ? AND p.active = 1`
+      );
       let total = 0;
       const lines = [];
       for (const [id, qty] of wanted) {
-        const p = getP.get(id);
-        if (!p) throw new AppError('product_unavailable', 409, { id });
+        const p = getLine.get(id, bakeDayId);
+        if (!p || p.capacity <= 0) throw new AppError('product_unavailable', 409, { id });
         if (p.max_per_order && qty > p.max_per_order) {
           throw new AppError('over_max_per_order', 409, { id, max: p.max_per_order, name_en: p.name_en, name_ar: p.name_ar });
         }
-        // Conditional decrement: succeeds only if enough stock is left.
-        const r = take.run(qty, id, qty);
-        if (r.changes !== 1) {
-          throw new AppError('out_of_stock', 409, { id, available: p.stock, name_en: p.name_en, name_ar: p.name_ar });
+        // Safe: the IMMEDIATE transaction holds the write lock between this check and the insert.
+        const available = p.capacity - reserved(bakeDayId, id);
+        if (qty > available) {
+          throw new AppError('out_of_stock', 409, { id, available: Math.max(0, available), name_en: p.name_en, name_ar: p.name_ar });
         }
         total += p.price_milli * qty;
         lines.push({ p, qty });
       }
 
       let code;
-      for (let i = 0; i < 10; i++) {
-        code = makeCode();
-        if (!db.prepare('SELECT 1 FROM orders WHERE code = ?').get(code)) break;
-      }
+      do { code = makeCode(); } while (db.prepare('SELECT 1 FROM orders WHERE code = ?').get(code));
       const r = db.prepare(
-        `INSERT INTO orders (code, customer_name, phone, pickup_date, notes, status, total_milli, lang)
-         VALUES (?, ?, ?, ?, ?, 'new', ?, ?)`
-      ).run(code, customer_name, phone, pickup_date, notes, total, lang);
+        `INSERT INTO orders (code, bake_day_id, customer_name, phone, pickup_date, notes, status, total_milli, lang)
+         VALUES (?, ?, ?, ?, ?, ?, 'new', ?, ?)`
+      ).run(code, bakeDayId, customer_name, phone, b.date, notes, total, lang);
       const orderId = Number(r.lastInsertRowid);
       const addItem = db.prepare(
         'INSERT INTO order_items (order_id, product_id, name_en, name_ar, unit_price_milli, qty) VALUES (?, ?, ?, ?, ?, ?)'
@@ -381,27 +525,30 @@ export function openStore(file = ':memory:') {
     let p;
     try { p = normalizePhone(phone); } catch { throw new AppError('order_not_found', 404); }
     const o = db.prepare('SELECT * FROM orders WHERE code = ?').get(c);
-    // Match on last 6 digits so "+966 5x..." and "05x..." both work.
+    // Match on the last 6 digits so "+966 5x…" and "05x…" both work.
     if (!o || o.phone.slice(-6) !== p.slice(-6)) throw new AppError('order_not_found', 404);
     const h = hydrateOrder(o);
     return { code: h.code, status: h.status, pickup_date: h.pickup_date, total: h.total, items: h.items, customer_name: h.customer_name };
   }
 
-  function listOrders({ status, date, from, to, limit = 300 } = {}) {
+  function listOrders({ status, bakeDayId, limit = 500 } = {}) {
     const where = [];
     const args = [];
     if (status && status !== 'all') {
       if (status === 'open') where.push("status IN ('new','ready')");
-      else { if (!ORDER_STATUSES.includes(status)) throw new AppError('invalid_status'); where.push('status = ?'); args.push(status); }
+      else {
+        if (!ORDER_STATUSES.includes(status)) throw new AppError('invalid_status');
+        where.push('status = ?');
+        args.push(status);
+      }
     }
-    if (date) { where.push('pickup_date = ?'); args.push(date); }
-    if (from) { where.push('pickup_date >= ?'); args.push(from); }
-    if (to) { where.push('pickup_date <= ?'); args.push(to); }
+    if (bakeDayId) { where.push('bake_day_id = ?'); args.push(Number(bakeDayId)); }
     const sql = `SELECT * FROM orders ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-                 ORDER BY pickup_date ASC, created_at ASC LIMIT ${Math.min(Number(limit) || 300, 1000)}`;
+                 ORDER BY pickup_date ASC, created_at ASC LIMIT ${Math.min(Number(limit) || 500, 1000)}`;
     return db.prepare(sql).all(...args).map(hydrateOrder);
   }
 
+  // Cancelled orders stop counting as reserved, so the items free up automatically.
   function setOrderStatus(id, status) {
     if (!ORDER_STATUSES.includes(status)) throw new AppError('invalid_status');
     return tx(() => {
@@ -409,57 +556,42 @@ export function openStore(file = ':memory:') {
       if (!o) throw new AppError('order_not_found', 404);
       if (o.status === status) return hydrateOrder(o);
       if (o.status === 'cancelled') throw new AppError('order_already_cancelled', 409);
-      if (status === 'cancelled') {
-        if (o.status === 'completed') throw new AppError('cannot_cancel_completed', 409);
-        // Return reserved items to inventory.
-        const items = db.prepare('SELECT product_id, qty FROM order_items WHERE order_id = ?').all(id);
-        const give = db.prepare('UPDATE products SET stock = stock + ? WHERE id = ?');
-        for (const it of items) if (it.product_id) give.run(it.qty, it.product_id);
-      }
+      if (status === 'cancelled' && o.status === 'completed') throw new AppError('cannot_cancel_completed', 409);
       db.prepare("UPDATE orders SET status = ?, updated_at = datetime('now') WHERE id = ?").run(status, id);
       return hydrateOrder(db.prepare('SELECT * FROM orders WHERE id = ?').get(id));
     });
   }
 
-  // Totals per product for a pickup date: what needs to be ready / handed over.
-  function productionList(date) {
-    return db.prepare(
-      `SELECT oi.product_id, oi.name_en, oi.name_ar, SUM(oi.qty) AS qty
-         FROM order_items oi JOIN orders o ON o.id = oi.order_id
-        WHERE o.pickup_date = ? AND o.status IN ('new','ready')
-        GROUP BY COALESCE(oi.product_id, oi.name_en)
-        ORDER BY qty DESC`
-    ).all(date).map((r) => ({ ...r, qty: Number(r.qty) }));
-  }
-
-  function summary(date) {
-    const d = date || localDate();
+  // The baker's bake sheet for one bake day.
+  function summary(bakeDayId) {
+    let b;
+    if (bakeDayId) b = getBakeDay(Number(bakeDayId));
+    else {
+      const next = db.prepare('SELECT id FROM bake_days WHERE date >= ? ORDER BY date ASC LIMIT 1').get(localDate(now()))
+        ?? db.prepare('SELECT id FROM bake_days ORDER BY date DESC LIMIT 1').get();
+      if (next) b = getBakeDay(next.id);
+    }
+    const allNew = Number(db.prepare("SELECT COUNT(*) AS n FROM orders WHERE status = 'new'").get().n);
+    if (!b) return { bake_day: null, all_new_orders: allNew };
     const row = db.prepare(
-      `SELECT
-         COUNT(*) FILTER (WHERE status = 'new') AS new_count,
-         COUNT(*) FILTER (WHERE status = 'ready') AS ready_count,
-         COUNT(*) FILTER (WHERE status = 'completed') AS completed_count,
-         COALESCE(SUM(total_milli) FILTER (WHERE status != 'cancelled'), 0) AS revenue_milli
-       FROM orders WHERE pickup_date = ?`
-    ).get(d);
-    const openAll = db.prepare("SELECT COUNT(*) AS n FROM orders WHERE status = 'new'").get().n;
-    const lowStock = db.prepare('SELECT * FROM products WHERE active = 1 AND stock <= 3 ORDER BY stock ASC').all().map(productRow);
+      `SELECT COUNT(*) FILTER (WHERE status = 'new') AS new_count,
+              COUNT(*) FILTER (WHERE status = 'ready') AS ready_count,
+              COUNT(*) FILTER (WHERE status = 'completed') AS completed_count,
+              COALESCE(SUM(total_milli) FILTER (WHERE status != 'cancelled'), 0) AS revenue_milli
+         FROM orders WHERE bake_day_id = ?`
+    ).get(b.id);
     return {
-      date: d,
+      bake_day: b,
       new_count: Number(row.new_count),
       ready_count: Number(row.ready_count),
       completed_count: Number(row.completed_count),
       revenue: Number(row.revenue_milli) / 1000,
-      all_new_orders: Number(openAll),
-      low_stock: lowStock,
-      production: productionList(d),
+      all_new_orders: allNew,
     };
   }
 
   // ----- auth -----
-  function hasPassword() {
-    return !!getSetting('admin_password_hash');
-  }
+  const hasPassword = () => !!getSetting('admin_password_hash');
   function setPassword(pw) {
     if (typeof pw !== 'string' || pw.length < 8 || pw.length > 200) throw new AppError('weak_password');
     const salt = crypto.randomBytes(16);
@@ -485,15 +617,14 @@ export function openStore(file = ':memory:') {
     const r = db.prepare('SELECT expires_at FROM sessions WHERE token = ?').get(token);
     return !!r && r.expires_at > Date.now();
   }
-  function deleteSession(token) {
-    db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
-  }
+  const deleteSession = (token) => db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
 
   return {
     db,
-    getSettings, updateSettings, pickupWindow,
-    listProducts, getProduct, createProduct, updateProduct, adjustStock, deleteProduct,
-    placeOrder, getOrder, lookupOrder, listOrders, setOrderStatus, productionList, summary,
+    getSettings, updateSettings,
+    listProducts, getProduct, createProduct, updateProduct, deleteProduct,
+    listBakeDays, publicBakeDays, getBakeDay, bakeDayTemplate, createBakeDay, updateBakeDay, deleteBakeDay,
+    placeOrder, getOrder, lookupOrder, listOrders, setOrderStatus, summary,
     hasPassword, setPassword, checkPassword, createSession, validSession, deleteSession,
     close: () => db.close(),
   };

@@ -150,7 +150,7 @@ export function createApp({ dbFile, uploadsDir, adminPassword, trustProxy = fals
   route('GET', '/api/shop', () => ({
     settings: store.getSettings(),
     products: store.listProducts(),
-    pickup: store.pickupWindow(),
+    bakeDays: store.publicBakeDays(),
   }));
 
   route('POST', '/api/orders', async ({ req }) => {
@@ -201,7 +201,7 @@ export function createApp({ dbFile, uploadsDir, adminPassword, trustProxy = fals
   }));
 
   // Admin data
-  route('GET', '/api/admin/summary', requireAdmin(({ url }) => store.summary(url.searchParams.get('date') || undefined)));
+  route('GET', '/api/admin/summary', requireAdmin(({ url }) => store.summary(url.searchParams.get('bake_day_id') || undefined)));
   route('GET', '/api/admin/settings', requireAdmin(() => store.getSettings()));
   route('PUT', '/api/admin/settings', requireAdmin(async ({ req }) => store.updateSettings(await readBody(req, 10_000))));
 
@@ -209,17 +209,24 @@ export function createApp({ dbFile, uploadsDir, adminPassword, trustProxy = fals
   route('POST', '/api/admin/products', requireAdmin(async ({ req }) => store.createProduct(await readBody(req, 10_000))));
   route('PUT', '/api/admin/products/:id', requireAdmin(async ({ req, params }) =>
     store.updateProduct(idParam(params.id), await readBody(req, 10_000))));
-  route('POST', '/api/admin/products/:id/stock', requireAdmin(async ({ req, params }) =>
-    store.adjustStock(idParam(params.id), await readBody(req, 1000))));
   route('DELETE', '/api/admin/products/:id', requireAdmin(({ params }) => {
     store.deleteProduct(idParam(params.id));
     return { ok: true };
   }));
 
+  route('GET', '/api/admin/bake-days', requireAdmin(({ url }) => store.listBakeDays({ scope: url.searchParams.get('scope') || 'upcoming' })));
+  route('GET', '/api/admin/bake-days/template', requireAdmin(() => store.bakeDayTemplate()));
+  route('POST', '/api/admin/bake-days', requireAdmin(async ({ req }) => store.createBakeDay(await readBody(req, 20_000))));
+  route('PUT', '/api/admin/bake-days/:id', requireAdmin(async ({ req, params }) =>
+    store.updateBakeDay(idParam(params.id), await readBody(req, 20_000))));
+  route('DELETE', '/api/admin/bake-days/:id', requireAdmin(({ params }) => {
+    store.deleteBakeDay(idParam(params.id));
+    return { ok: true };
+  }));
+
   route('GET', '/api/admin/orders', requireAdmin(({ url }) => store.listOrders({
     status: url.searchParams.get('status') || undefined,
-    date: url.searchParams.get('date') || undefined,
-    from: url.searchParams.get('from') || undefined,
+    bakeDayId: url.searchParams.get('bake_day_id') || undefined,
   })));
   route('PUT', '/api/admin/orders/:id/status', requireAdmin(async ({ req, params }) => {
     const { status } = await readBody(req, 1000);

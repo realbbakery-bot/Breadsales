@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from '../src/server.js';
-import { localDate } from '../src/store.js';
+import { localDate, addDays } from '../src/store.js';
 
 let server, base, tmp, app;
 const quiet = { info() {}, error() {} };
@@ -42,22 +42,28 @@ test('end-to-end: setup, stock a product, customer orders, baker sees it', async
   const cookie = setup.cookie;
   assert.ok(cookie.startsWith('bs_session='));
 
-  const prod = await req('POST', '/api/admin/products', { name_en: 'Baguette', name_ar: 'باغيت', price: '6.50', stock: 2 }, cookie);
+  const prod = await req('POST', '/api/admin/products', { name_en: 'Baguette', name_ar: 'باغيت', price: '6.50' }, cookie);
   assert.equal(prod.status, 200);
   assert.equal(prod.data.price, 6.5);
 
+  const day = await req('POST', '/api/admin/bake-days', {
+    date: addDays(localDate(), 3), cutoff_at: '', items: [{ product_id: prod.data.id, capacity: 2 }],
+  }, cookie);
+  assert.equal(day.status, 200);
+
   const shop = await req('GET', '/api/shop');
   assert.equal(shop.data.products.length, 1);
+  assert.deepEqual(shop.data.bakeDays[0].items, [{ product_id: prod.data.id, remaining: 2 }]);
   assert.equal(shop.data.settings.admin_password_hash, undefined, 'password hash must never leak');
 
   const order = await req('POST', '/api/orders', {
-    customer_name: 'Omar', phone: '0501112233', pickup_date: localDate(), items: [{ id: prod.data.id, qty: 2 }],
+    customer_name: 'Omar', phone: '0501112233', bake_day_id: day.data.id, items: [{ id: prod.data.id, qty: 2 }],
   });
   assert.equal(order.status, 200);
   assert.equal(order.data.order.total, 13);
 
   const sold = await req('POST', '/api/orders', {
-    customer_name: 'Lina', phone: '0501112244', pickup_date: localDate(), items: [{ id: prod.data.id, qty: 1 }],
+    customer_name: 'Lina', phone: '0501112244', bake_day_id: day.data.id, items: [{ id: prod.data.id, qty: 1 }],
   });
   assert.equal(sold.status, 409);
   assert.equal(sold.data.error, 'out_of_stock');
@@ -68,7 +74,7 @@ test('end-to-end: setup, stock a product, customer orders, baker sees it', async
 
   const cancelled = await req('PUT', `/api/admin/orders/${orders.data[0].id}/status`, { status: 'cancelled' }, cookie);
   assert.equal(cancelled.data.status, 'cancelled');
-  assert.equal((await req('GET', '/api/shop')).data.products[0].stock, 2);
+  assert.equal((await req('GET', '/api/shop')).data.bakeDays[0].items[0].remaining, 2);
 });
 
 test('rejects non-JSON posts (CSRF guard) and serves pages', async () => {

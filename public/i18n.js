@@ -27,7 +27,7 @@ const STRINGS = {
     status_cancelled: 'Cancelled',
 
     // shop
-    menu_title: "Today's menu",
+    menu_title: 'Available on this bake',
     sold_out: 'Sold out',
     left_n: '{n} left',
     only_n_left: 'Only {n} left!',
@@ -96,9 +96,9 @@ const STRINGS = {
     setup_code: 'Setup code',
     new_password: 'New password (min. 8 characters)',
     create_password: 'Create password',
-    tab_today: 'Today',
+    tab_today: 'Bake sheet',
     tab_orders: 'Orders',
-    tab_products: 'Menu & stock',
+    tab_products: 'Menu',
     tab_settings: 'Settings',
     kpi_new: 'New orders',
     kpi_ready: 'Ready',
@@ -168,6 +168,52 @@ const STRINGS = {
     share_link: 'Share this link with your customers:',
     copy: 'Copy',
     copied: 'Copied!',
+
+    // bake days
+    choose_bake_day: 'Choose your bake day',
+    orders_close: 'Orders close {when}',
+    no_bake_days: 'No bake is open for orders right now. Please check back soon!',
+    bake_day_label: 'Bake day',
+    err_orders_closed_for_day: 'Orders for this bake day have just closed.',
+    err_bake_day_unavailable: 'This bake day is no longer available.',
+    err_bake_day_not_found: 'This bake day is no longer available.',
+    err_capacity_below_reserved: '{reserved} of “{item}” are already reserved, so the quantity cannot be lower.',
+    err_bake_day_exists: 'There is already a bake day on that date.',
+    err_bake_day_has_orders: 'This bake day has orders, so it cannot be moved or deleted. Pause it instead.',
+    err_invalid_date: 'Please choose a valid date.',
+    err_invalid_cutoff: 'Please enter a valid closing time.',
+    err_cutoff_after_bake_day: 'Orders must close before the end of the bake day.',
+    err_invalid_time: 'Please enter a valid time.',
+    tab_bake_days: 'Bake days',
+    new_bake_day: 'Plan a bake day',
+    edit_bake_day: 'Edit bake day',
+    bake_date: 'Bake & pickup date',
+    cutoff: 'Orders close at',
+    cutoff_hint: 'Leave empty to accept orders until the bake day itself.',
+    note_en: 'Note for customers (English)',
+    note_ar: 'Note for customers (Arabic)',
+    how_many: 'How many will you bake?',
+    open_for_orders: 'Open for orders',
+    state_open: 'Taking orders',
+    state_cutoff: 'Orders closed',
+    state_closed: 'Paused',
+    state_past: 'Done',
+    reserved_of: '{r} / {c} reserved',
+    to_bake: 'To bake',
+    bake_left: 'left',
+    no_bake_days_admin: 'No bake days planned. Plan your next bake!',
+    show_past: 'Show past bakes',
+    show_upcoming: 'Show upcoming',
+    default_qty: 'Usual quantity per bake',
+    cutoff_days_before: 'Close orders this many days before',
+    cutoff_time: 'Closing time',
+    s_bake_defaults: 'New bake day defaults',
+    orders_n: '{n} orders',
+    all_bake_days: 'All bake days',
+    prefilled_hint: 'Pre-filled from your last bake. Adjust and save.',
+    no_products_for_bake: 'Add items to your menu first, then plan a bake day.',
+    not_on_bake: 'Not baking',
+    confirm_delete_day: 'Delete this bake day?',
   },
 
   ar: {
@@ -194,7 +240,7 @@ const STRINGS = {
     status_completed: 'تم الاستلام',
     status_cancelled: 'ملغى',
 
-    menu_title: 'قائمة اليوم',
+    menu_title: 'المتاح في هذه الخَبزة',
     sold_out: 'نفدت الكمية',
     left_n: 'المتبقي {n}',
     only_n_left: 'لم يتبقَّ سوى {n}!',
@@ -261,9 +307,9 @@ const STRINGS = {
     setup_code: 'رمز الإعداد',
     new_password: 'كلمة مرور جديدة (٨ أحرف على الأقل)',
     create_password: 'إنشاء كلمة المرور',
-    tab_today: 'اليوم',
+    tab_today: 'جدول الخَبز',
     tab_orders: 'الطلبات',
-    tab_products: 'القائمة والمخزون',
+    tab_products: 'القائمة',
     tab_settings: 'الإعدادات',
     kpi_new: 'طلبات جديدة',
     kpi_ready: 'جاهزة',
@@ -333,6 +379,51 @@ const STRINGS = {
     share_link: 'شارك هذا الرابط مع عملائك:',
     copy: 'نسخ',
     copied: 'تم النسخ!',
+
+    choose_bake_day: 'اختر يوم الخَبز',
+    orders_close: 'آخر موعد للطلب {when}',
+    no_bake_days: 'لا توجد خَبزة متاحة للطلب حاليًا. يُرجى العودة قريبًا.',
+    bake_day_label: 'يوم الخَبز',
+    err_orders_closed_for_day: 'أُغلق باب الطلب لهذا اليوم للتو.',
+    err_bake_day_unavailable: 'يوم الخَبز هذا لم يعد متاحًا.',
+    err_bake_day_not_found: 'يوم الخَبز هذا لم يعد متاحًا.',
+    err_capacity_below_reserved: 'تم حجز {reserved} من «{item}» مسبقًا، ولا يمكن أن تقل الكمية عن ذلك.',
+    err_bake_day_exists: 'يوجد يوم خَبز في هذا التاريخ مسبقًا.',
+    err_bake_day_has_orders: 'لهذا اليوم طلبات، فلا يمكن نقله أو حذفه. يمكنك إيقافه مؤقتًا بدلًا من ذلك.',
+    err_invalid_date: 'يُرجى اختيار تاريخ صحيح.',
+    err_invalid_cutoff: 'يُرجى إدخال موعد إغلاق صحيح.',
+    err_cutoff_after_bake_day: 'يجب أن يُغلق الطلب قبل نهاية يوم الخَبز.',
+    err_invalid_time: 'يُرجى إدخال وقت صحيح.',
+    tab_bake_days: 'أيام الخَبز',
+    new_bake_day: 'خطّط يوم خَبز',
+    edit_bake_day: 'تعديل يوم الخَبز',
+    bake_date: 'تاريخ الخَبز والاستلام',
+    cutoff: 'موعد إغلاق الطلبات',
+    cutoff_hint: 'اتركه فارغًا لاستقبال الطلبات حتى يوم الخَبز نفسه.',
+    note_en: 'ملاحظة للعملاء (بالإنجليزية)',
+    note_ar: 'ملاحظة للعملاء (بالعربية)',
+    how_many: 'كم ستخبز من كل صنف؟',
+    open_for_orders: 'متاح للطلب',
+    state_open: 'يستقبل الطلبات',
+    state_cutoff: 'أُغلقت الطلبات',
+    state_closed: 'متوقف مؤقتًا',
+    state_past: 'منتهٍ',
+    reserved_of: 'محجوز {r} من {c}',
+    to_bake: 'المطلوب خَبزه',
+    bake_left: 'متبقٍّ',
+    no_bake_days_admin: 'لا توجد أيام خَبز مخطط لها. خطّط لخَبزتك القادمة!',
+    show_past: 'عرض الخَبزات السابقة',
+    show_upcoming: 'عرض القادمة',
+    default_qty: 'الكمية المعتادة لكل خَبزة',
+    cutoff_days_before: 'إغلاق الطلبات قبل يوم الخَبز بعدد أيام',
+    cutoff_time: 'وقت الإغلاق',
+    s_bake_defaults: 'الإعدادات الافتراضية ليوم الخَبز',
+    orders_n: 'عدد الطلبات: {n}',
+    all_bake_days: 'كل أيام الخَبز',
+    prefilled_hint: 'تمت التعبئة من خَبزتك الأخيرة. عدّل ثم احفظ.',
+    no_products_for_bake: 'أضف أصنافًا إلى قائمتك أولًا، ثم خطّط يوم الخَبز.',
+    not_on_bake: 'لن يُخبز',
+    confirm_delete_day: 'هل تريد حذف يوم الخَبز هذا؟',
   },
 };
 
@@ -392,6 +483,16 @@ export function formatDate(iso) {
   const date = new Date(y, m - 1, d);
   const locale = i18n.lang === 'ar' ? 'ar-u-nu-latn' : 'en-GB';
   return date.toLocaleDateString(locale, { weekday: 'long', day: 'numeric', month: 'long' });
+}
+
+export function formatCutoff(local) {
+  if (!local) return '';
+  const [d, tm] = local.split('T');
+  const [y, m, day] = d.split('-').map(Number);
+  const [hh, mm] = tm.split(':').map(Number);
+  const date = new Date(y, m - 1, day, hh, mm);
+  const locale = i18n.lang === 'ar' ? 'ar-u-nu-latn' : 'en-GB';
+  return date.toLocaleString(locale, { weekday: 'long', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
 }
 
 export function formatDateTime(sqlUtc) {
