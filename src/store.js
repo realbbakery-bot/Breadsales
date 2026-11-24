@@ -8,6 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { KINDS, flourTotal } from '../public/bakersmath.js';
 
 export class AppError extends Error {
   constructor(code, status = 400, details = {}) {
@@ -18,7 +19,7 @@ export class AppError extends Error {
   }
 }
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const SCHEMA = `
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS settings (
@@ -81,6 +82,24 @@ CREATE TABLE IF NOT EXISTS order_items (
   qty              INTEGER NOT NULL CHECK (qty > 0)
 );
 CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);
+CREATE TABLE IF NOT EXISTS recipes (
+  product_id       INTEGER PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
+  piece_weight_g   REAL NOT NULL CHECK (piece_weight_g > 0),
+  waste_pct        REAL NOT NULL DEFAULT 0,
+  levain_hydration REAL NOT NULL DEFAULT 100,
+  notes_en         TEXT NOT NULL DEFAULT '',
+  notes_ar         TEXT NOT NULL DEFAULT '',
+  updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS recipe_ingredients (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  product_id INTEGER NOT NULL REFERENCES recipes(product_id) ON DELETE CASCADE,
+  kind       TEXT NOT NULL,
+  name_en    TEXT NOT NULL DEFAULT '',
+  name_ar    TEXT NOT NULL DEFAULT '',
+  pct        REAL NOT NULL CHECK (pct >= 0),
+  sort       INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS sessions (
   token      TEXT PRIMARY KEY,
   expires_at INTEGER NOT NULL
@@ -176,7 +195,7 @@ export function openStore(file = ':memory:', { now = () => new Date() } = {}) {
 
   const version = db.prepare('PRAGMA user_version').get().user_version;
   const hasTables = db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'products'").get();
-  if (hasTables && version < SCHEMA_VERSION) {
+  if (hasTables && version < 2) {
     throw new Error(`Database ${file} uses an older format (v${version}). Start with an empty DATA_DIR.`);
   }
   db.exec(SCHEMA);
@@ -438,6 +457,67 @@ export function openStore(file = ':memory:', { now = () => new Date() } = {}) {
     db.prepare('DELETE FROM bake_days WHERE id = ?').run(id);
   }
 
+  // ----- recipes (baker's percentages) -----
+  function recipeRow(r) {
+    return {
+      product_id: r.product_id,
+      piece_weight_g: r.piece_weight_g,
+      waste_pct: r.waste_pct,
+      levain_hydration: r.levain_hydration,
+      notes_en: r.notes_en,
+      notes_ar: r.notes_ar,
+      ingredients: db.prepare('SELECT kind, name_en, name_ar, pct FROM recipe_ingredients WHERE product_id = ? ORDER BY sort, id')
+        .all(r.product_id).map((i) => ({ ...i })),
+    };
+  }
+  function listRecipes() {
+    return db.prepare('SELECT * FROM recipes').all().map(recipeRow);
+  }
+  function getRecipe(productId) {
+    const r = db.prepare('SELECT * FROM recipes WHERE product_id = ?').get(productId);
+    if (!r) throw new AppError('recipe_not_found', 404);
+    return recipeRow(r);
+  }
+  function num(v, { min, max }) {
+    const n = Number(v);
+    if (v === '' || v === null || v === undefined || !Number.isFinite(n) || n < min || n > max) throw new AppError('invalid_number');
+    return n;
+  }
+  function saveRecipe(productId, input = {}) {
+    getProduct(productId);
+    const piece = num(input.piece_weight_g, { min: 1, max: 100000 });
+    const waste = num(input.waste_pct ?? 0, { min: 0, max: 50 });
+    const levH = num(input.levain_hydration ?? 100, { min: 0, max: 500 });
+    if (!Array.isArray(input.ingredients) || input.ingredients.length === 0 || input.ingredients.length > 40) {
+      throw new AppError('invalid_recipe');
+    }
+    const ings = input.ingredients.map((i) => {
+      if (!KINDS.includes(i?.kind)) throw new AppError('invalid_recipe');
+      const name_en = str(i.name_en, 60);
+      const name_ar = str(i.name_ar, 60);
+      if (!name_en && !name_ar) throw new AppError('ingredient_name_required');
+      return { kind: i.kind, name_en, name_ar, pct: num(i.pct, { min: 0, max: 1000 }) };
+    });
+    // Baker's math only works when the flours add up to 100%.
+    const ft = flourTotal(ings);
+    if (Math.abs(ft - 100) > 0.01) throw new AppError('flour_must_total_100', 400, { total: Math.round(ft * 100) / 100 });
+    return tx(() => {
+      db.prepare(
+        `INSERT INTO recipes (product_id, piece_weight_g, waste_pct, levain_hydration, notes_en, notes_ar) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(product_id) DO UPDATE SET piece_weight_g = excluded.piece_weight_g, waste_pct = excluded.waste_pct,
+           levain_hydration = excluded.levain_hydration, notes_en = excluded.notes_en, notes_ar = excluded.notes_ar,
+           updated_at = datetime('now')`
+      ).run(productId, piece, waste, levH, str(input.notes_en, 1000), str(input.notes_ar, 1000));
+      db.prepare('DELETE FROM recipe_ingredients WHERE product_id = ?').run(productId);
+      const add = db.prepare('INSERT INTO recipe_ingredients (product_id, kind, name_en, name_ar, pct, sort) VALUES (?, ?, ?, ?, ?, ?)');
+      ings.forEach((i, idx) => add.run(productId, i.kind, i.name_en, i.name_ar, i.pct, idx));
+      return getRecipe(productId);
+    });
+  }
+  function deleteRecipe(productId) {
+    db.prepare('DELETE FROM recipes WHERE product_id = ?').run(productId);
+  }
+
   // ----- orders -----
   function hydrateOrder(o) {
     if (!o) return null;
@@ -624,6 +704,7 @@ export function openStore(file = ':memory:', { now = () => new Date() } = {}) {
     getSettings, updateSettings,
     listProducts, getProduct, createProduct, updateProduct, deleteProduct,
     listBakeDays, publicBakeDays, getBakeDay, bakeDayTemplate, createBakeDay, updateBakeDay, deleteBakeDay,
+    listRecipes, getRecipe, saveRecipe, deleteRecipe,
     placeOrder, getOrder, lookupOrder, listOrders, setOrderStatus, summary,
     hasPassword, setPassword, checkPassword, createSession, validSession, deleteSession,
     close: () => db.close(),

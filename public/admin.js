@@ -1,9 +1,16 @@
 import { i18n, t, esc, money, formatDate, formatCutoff, formatDateTime, api, errorText, toast } from '/i18n.js';
+import { KINDS, computeDough, aggregate, hydration, flourTotal, starterRecipe, roundGrams } from '/bakersmath.js';
 
 const app = document.getElementById('app');
 const sheetRoot = document.getElementById('sheetRoot');
 const EMOJIS = ['🍞', '🥖', '🥐', '🥯', '🥨', '🫓', '🧁', '🍰', '🎂', '🍪', '🥧', '🍩', '🍫', '🧇', '🥮', '🍯'];
-const TABS = ['today', 'bakedays', 'orders', 'products', 'settings'];
+const TABS = ['today', 'bakedays', 'production', 'orders', 'products', 'settings'];
+const todayISO = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+const fmtG = (g) => roundGrams(g).toLocaleString('en-US', { maximumFractionDigits: 1 });
+const gr = (g) => `${fmtG(g)} ${t('unit_g')}`;
 
 const state = {
   tab: TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'today',
@@ -18,6 +25,9 @@ const state = {
   products: [],
   editing: null, // product being edited
   editingDay: null, // bake day being edited
+  editingRecipe: null, // recipe being edited
+  recipes: [],
+  prod: { dayId: null, forDay: null, loaves: {}, extra: 1 }, // production planner
   poller: null,
 };
 
@@ -80,7 +90,7 @@ async function startApp() {
   renderShell();
   await loadTab();
   if (!state.poller) {
-    state.poller = setInterval(() => { if (!document.hidden && !state.editing && !state.editingDay) loadTab(true); }, 45_000);
+    state.poller = setInterval(() => { if (!document.hidden && !state.editing && !state.editingDay && !state.editingRecipe && state.tab !== 'production') loadTab(true); }, 45_000);
   }
 }
 
@@ -125,8 +135,12 @@ async function loadTab(silent) {
       [state.orders, state.summary, state.allDays] = await Promise.all([
         call(`/api/admin/orders?${q}`), call(`/api/admin/summary${sumQ}`), call('/api/admin/bake-days?scope=all'),
       ]);
+    } else if (state.tab === 'production') {
+      [state.allDays, state.products, state.recipes] = await Promise.all([
+        call('/api/admin/bake-days?scope=all'), call('/api/admin/products'), call('/api/admin/recipes'),
+      ]);
     } else if (state.tab === 'products') {
-      state.products = await call('/api/admin/products');
+      [state.products, state.recipes] = await Promise.all([call('/api/admin/products'), call('/api/admin/recipes')]);
     } else if (state.tab === 'settings') {
       state.settings = await call('/api/admin/settings');
     }
@@ -142,7 +156,7 @@ async function loadTab(silent) {
 function renderView() {
   const v = view();
   if (!v) return;
-  const r = { today: renderToday, bakedays: renderBakeDays, orders: renderOrders, products: renderProducts, settings: renderSettings };
+  const r = { today: renderToday, bakedays: renderBakeDays, production: renderProduction, orders: renderOrders, products: renderProducts, settings: renderSettings };
   v.innerHTML = r[state.tab]();
 }
 
@@ -391,7 +405,7 @@ function renderProducts() {
         <div class="n">${esc(i18n.pick(p, 'name'))}</div>
         <div class="small muted">${esc(money(p.price, st))}${p.active ? '' : ` · ${esc(t('hidden'))}`}${p.max_per_order ? ` · ${esc(t('max_n', { n: p.max_per_order }))}` : ''}</div>
       </div>
-      <span class="btn btn-sm btn-ghost">✏️ ${esc(t('edit'))}</span>
+      <button class="btn btn-sm ${state.recipes.some((r) => r.product_id === p.id) ? '' : 'btn-ghost'}" type="button" data-act="edit-recipe" data-id="${p.id}">🧪 ${esc(t(state.recipes.some((r) => r.product_id === p.id) ? 'recipe' : 'add_recipe'))}</button>
     </div>`).join('');
 }
 
@@ -559,10 +573,239 @@ async function saveSettings(form) {
   }
 }
 
+// ---------- recipes (baker's math) ----------
+const pctStr = (n) => (Math.round(n * 10) / 10).toLocaleString('en-US');
+
+function openRecipeEditor(productId) {
+  const existing = state.recipes.find((r) => r.product_id === productId);
+  const base = existing ? structuredClone(existing) : { product_id: productId, ...starterRecipe() };
+  state.editingRecipe = { ...base, isNew: !existing, tryN: Math.max(1, state.products.find((p) => p.id === productId)?.default_qty || 10) };
+  renderRecipeSheet();
+}
+
+function renderRecipeSheet() {
+  const r = state.editingRecipe;
+  if (!r) { sheetRoot.innerHTML = ''; document.body.style.overflow = ''; return; }
+  document.body.style.overflow = 'hidden';
+  const p = state.products.find((x) => x.id === r.product_id) || {};
+  const num = (name, val, extra = '') => `<div class="field"><label for="r_${name}">${esc(t(name))}</label>
+    <input id="r_${name}" name="${name}" type="number" inputmode="decimal" step="any" min="0" dir="ltr" value="${esc(val)}" ${extra}></div>`;
+  const ingRows = r.ingredients.map((i, idx) => `
+    <div class="ing-row" data-idx="${idx}">
+      <div class="ing-top">
+        <select name="kind" aria-label="${esc(t('ingredients'))}">${KINDS.map((k) => `<option value="${k}" ${k === i.kind ? 'selected' : ''}>${esc(t('kind_' + k))}</option>`).join('')}</select>
+        <div class="pct-box"><input name="pct" type="number" inputmode="decimal" step="any" min="0" dir="ltr" value="${esc(i.pct)}" aria-label="%"><span>%</span></div>
+        <button class="icon-btn" type="button" data-act="rm-ing" data-idx="${idx}" aria-label="${esc(t('remove'))}">✕</button>
+      </div>
+      <div class="field-row ing-names">
+        <input class="input" name="name_ar" dir="rtl" maxlength="60" placeholder="${esc(t('ing_name_ar'))}" value="${esc(i.name_ar || '')}">
+        <input class="input" name="name_en" dir="ltr" maxlength="60" placeholder="${esc(t('ing_name_en'))}" value="${esc(i.name_en || '')}">
+      </div>
+    </div>`).join('');
+  sheetRoot.innerHTML = `<div class="sheet-backdrop" data-act="close-backdrop">
+    <div class="sheet" role="dialog" aria-modal="true">
+      <div class="sheet-handle"></div>
+      <div class="sheet-head"><h2>🧪 ${esc(i18n.pick(p, 'name'))}</h2>
+        <button class="icon-btn" type="button" data-act="close" aria-label="${esc(t('close'))}">✕</button></div>
+      <p class="small muted" style="margin-top:0">${esc(t('math_explainer'))}</p>
+      <form id="recipeForm" novalidate>
+        <div id="formError" class="form-error hidden" role="alert"></div>
+        <div class="field-row">${num('piece_weight_g', r.piece_weight_g, 'min="1"')}${num('waste_pct', r.waste_pct)}</div>
+        ${num('levain_hydration', r.levain_hydration)}
+        <h3 style="margin:8px 0">${esc(t('ingredients'))}</h3>
+        ${ingRows}
+        <button class="btn btn-sm" type="button" data-act="add-ing" style="margin:6px 0 14px">${esc(t('add_ingredient'))}</button>
+        <div id="recipePreview"></div>
+        <div class="field-row" style="margin-top:14px">
+          <div class="field"><label for="r_notes_ar">${esc(t('recipe_notes_ar'))}</label><textarea id="r_notes_ar" name="notes_ar" dir="rtl" maxlength="1000">${esc(r.notes_ar || '')}</textarea></div>
+          <div class="field"><label for="r_notes_en">${esc(t('recipe_notes_en'))}</label><textarea id="r_notes_en" name="notes_en" dir="ltr" maxlength="1000">${esc(r.notes_en || '')}</textarea></div>
+        </div>
+        <div class="stack">
+          <button class="btn btn-primary btn-block" type="submit">${esc(t('save'))}</button>
+          ${r.isNew ? '' : `<button class="btn btn-danger btn-block" type="button" data-act="delete-recipe">${esc(t('delete_recipe'))}</button>`}
+        </div>
+      </form>
+    </div></div>`;
+  renderRecipePreview();
+}
+
+function captureRecipeForm() {
+  const f = document.getElementById('recipeForm');
+  const r = state.editingRecipe;
+  if (!f || !r) return;
+  for (const k of ['piece_weight_g', 'waste_pct', 'levain_hydration', 'notes_ar', 'notes_en']) r[k] = f.elements[k].value;
+  r.ingredients = [...f.querySelectorAll('.ing-row')].map((row) => ({
+    kind: row.querySelector('[name=kind]').value,
+    pct: row.querySelector('[name=pct]').value,
+    name_ar: row.querySelector('[name=name_ar]').value,
+    name_en: row.querySelector('[name=name_en]').value,
+  }));
+  const tryInput = document.getElementById('r_try');
+  if (tryInput) r.tryN = Math.max(0, Math.floor(Number(tryInput.value) || 0));
+}
+
+function doughTable(d) {
+  return `<table class="dough-table"><tbody>
+    ${d.lines.map((l) => `<tr><td>${esc(i18n.pick(l, 'name'))}<span class="kind-tag">${esc(t('kind_' + l.kind))}</span></td>
+      ${l.pct !== undefined ? `<td class="muted"><bdi>${pctStr(Number(l.pct))}%</bdi></td>` : ''}<td class="g">${gr(l.grams)}</td></tr>`).join('')}
+  </tbody></table>`;
+}
+
+function renderRecipePreview() {
+  const box = document.getElementById('recipePreview');
+  const r = state.editingRecipe;
+  if (!box || !r) return;
+  const ft = flourTotal(r.ingredients.map((i) => ({ ...i, pct: Number(i.pct) || 0 })));
+  const ok = Math.abs(ft - 100) <= 0.01;
+  const h = hydration({ ...r, ingredients: r.ingredients.map((i) => ({ ...i, pct: Number(i.pct) || 0 })) });
+  const d = computeDough({ ...r, ingredients: r.ingredients.map((i) => ({ ...i, pct: Number(i.pct) || 0 })) }, r.tryN);
+  box.innerHTML = `<div class="panel" style="background:var(--bg)">
+    <div class="${ok ? 'ok-line' : 'form-error'}" style="margin-bottom:8px">${esc(ok ? t('flour_total_ok') : t('flour_total_bad', { n: pctStr(ft) }))}</div>
+    <p class="small" style="margin:0 0 10px">💧 ${esc(t('hydration_line', { f: pctStr(h.formula), o: pctStr(h.overall), p: pctStr(h.prefermented) }))}</p>
+    <div class="row" style="margin-bottom:6px"><label for="r_try"><strong>${esc(t('try_batch'))}</strong></label>
+      <input id="r_try" class="input" type="number" inputmode="numeric" min="0" step="1" dir="ltr" value="${r.tryN}" style="width:90px;min-height:38px;padding:6px 10px"></div>
+    ${ok ? `${doughTable(d)}<div class="total-row small"><span>${esc(t('total_dough'))}</span><span>${gr(d.totalDough)}</span></div>` : ''}
+  </div>`;
+}
+
+async function saveRecipe(form) {
+  captureRecipeForm();
+  const r = state.editingRecipe;
+  try {
+    await call(`/api/admin/recipes/${r.product_id}`, {
+      method: 'PUT',
+      body: {
+        piece_weight_g: r.piece_weight_g, waste_pct: r.waste_pct, levain_hydration: r.levain_hydration,
+        notes_ar: r.notes_ar, notes_en: r.notes_en, ingredients: r.ingredients,
+      },
+    });
+    closeSheets();
+    toast(t('saved'), 'success');
+    loadTab();
+  } catch (err) {
+    const box = form.querySelector('#formError');
+    box.textContent = errorText(err);
+    box.classList.remove('hidden');
+    box.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
+}
+
+// ---------- production planner ----------
+function prodDay() {
+  const days = state.allDays;
+  if (!days.length) return null;
+  const chosen = days.find((d) => d.id === state.prod.dayId);
+  if (chosen) return chosen;
+  const upcoming = days.filter((d) => d.date >= todayISO()).sort((a, b) => (a.date < b.date ? -1 : 1));
+  return upcoming[0] || [...days].sort((a, b) => (a.date < b.date ? 1 : -1))[0];
+}
+
+function prodProducts(day) {
+  const inDay = new Set(day.items.map((i) => i.product_id));
+  return state.products.filter((p) => p.active || inDay.has(p.id));
+}
+
+function renderProduction() {
+  const day = prodDay();
+  if (!day) {
+    return `<div class="empty"><div class="big">🌾</div><p>${esc(t('no_production'))}</p>
+      <button class="btn btn-primary" type="button" data-act="new-day">+ ${esc(t('new_bake_day'))}</button></div>`;
+  }
+  const items = new Map(day.items.map((i) => [i.product_id, i]));
+  if (state.prod.forDay !== day.id) {
+    state.prod.forDay = day.id;
+    state.prod.dayId = day.id;
+    state.prod.loaves = Object.fromEntries(day.items.map((i) => [i.product_id, i.capacity]));
+  }
+  const recipes = new Map(state.recipes.map((r) => [r.product_id, r]));
+  const batches = [];
+  const cards = prodProducts(day).map((p) => {
+    const n = state.prod.loaves[p.id] || 0;
+    const reserved = items.get(p.id)?.reserved || 0;
+    const r = recipes.get(p.id);
+    let body = '';
+    if (!r) {
+      body = `<div class="spread" style="margin-top:8px"><span class="muted small">${esc(t('no_recipe'))}</span>
+        <button class="btn btn-sm no-print" type="button" data-act="edit-recipe" data-id="${p.id}">🧪 ${esc(t('add_recipe'))}</button></div>`;
+    } else if (n > 0) {
+      const d = computeDough(r, n);
+      batches.push(d);
+      body = `<div class="spread small" style="margin:8px 0 2px"><strong>${esc(t('total_dough'))}: ${gr(d.totalDough)}</strong>
+        <span class="muted">${esc(t('dough_for', { n, w: fmtG(Number(r.piece_weight_g)) }))}${Number(r.waste_pct) ? ` <bdi>+${pctStr(Number(r.waste_pct))}%</bdi>` : ''}</span></div>
+        ${doughTable(d)}`;
+    }
+    return `<div class="panel prod-card">
+      <div class="spread">
+        <div class="row" style="flex-wrap:nowrap;min-width:0">
+          <div class="prod-thumb">${p.image_url ? `<img src="${esc(p.image_url)}" alt="">` : esc(p.emoji || '🍞')}</div>
+          <div style="min-width:0"><strong>${esc(i18n.pick(p, 'name'))}</strong>
+            <div class="small muted">${esc(t('reserved_n', { n: reserved }))}</div></div>
+        </div>
+        <div class="prod-stock">
+          <button class="icon-btn no-print" type="button" data-act="prod-step" data-id="${p.id}" data-delta="-1" aria-label="−1">−</button>
+          <input id="loaves-${p.id}" type="number" inputmode="numeric" min="${reserved}" step="1" value="${n}" data-loaves="${p.id}" aria-label="${esc(t('loaves'))}">
+          <button class="icon-btn no-print" type="button" data-act="prod-step" data-id="${p.id}" data-delta="1" aria-label="+1">+</button>
+        </div>
+      </div>${body}</div>`;
+  }).join('');
+
+  const agg = aggregate(batches);
+  const weighing = batches.length ? `<div class="panel weigh-panel">
+      <h3>⚖️ ${esc(t('weighing_list'))}</h3>
+      <table class="dough-table"><tbody>
+        ${agg.lines.map((l) => `<tr><td>${esc(i18n.pick(l, 'name'))}<span class="kind-tag">${esc(t('kind_' + l.kind))}</span></td><td class="g">${gr(l.grams)}</td></tr>`).join('')}
+      </tbody></table>
+      <div class="total-row"><span>${esc(t('total_dough'))}</span><span>${gr(agg.totalDough)}</span></div>
+      ${agg.levain.total > 0 ? `<div class="note" style="margin-bottom:0">🫙 <strong>${esc(t('levain_to_build'))}: ${gr(agg.levain.total)}</strong>
+        <div class="small">${esc(t('levain_split', { flour: fmtG(agg.levain.flour), water: fmtG(agg.levain.water) }))}</div></div>` : ''}
+    </div>` : '';
+
+  return `
+    <div class="panel no-print">
+      <div class="spread">
+        <select class="input select-inline" data-act="prod-day" aria-label="${esc(t('bake_day_label'))}">${dayOptions(day.id)}</select>
+        <button class="btn btn-sm" type="button" data-act="print">🖨️ ${esc(t('print'))}</button>
+      </div>
+      <p class="small muted" style="margin:10px 0">${esc(t('prod_intro'))}</p>
+      ${day.state === 'cutoff' || day.state === 'past' ? `<div class="note">⏰ ${esc(t('mix_after_cutoff'))}</div>` : ''}
+      <div class="row">
+        <button class="btn btn-sm" type="button" data-act="prod-planned">${esc(t('use_planned'))}</button>
+        <button class="btn btn-sm" type="button" data-act="prod-orders">${esc(t('use_orders'))}</button>
+        <label class="row small" style="gap:6px">${esc(t('extra'))}
+          <input id="prod-extra" class="input" type="number" min="0" step="1" dir="ltr" value="${state.prod.extra}" style="width:70px;min-height:36px;padding:4px 8px"></label>
+      </div>
+    </div>
+    <h2 class="section-title" style="margin:6px 0 12px">📅 ${esc(formatDate(day.date))} ${statePill(day)}</h2>
+    ${cards}
+    ${weighing}
+    <button class="btn btn-primary btn-block no-print" type="button" data-act="prod-apply" style="margin-top:6px">✅ ${esc(t('apply_capacity'))}</button>`;
+}
+
+function rerenderProduction(focusId) {
+  renderView();
+  if (focusId) {
+    const el = document.getElementById(focusId);
+    if (el) { el.focus(); try { const v = el.value; el.value = ''; el.value = v; } catch {} }
+  }
+}
+
+async function applyProduction() {
+  const day = prodDay();
+  const inDay = new Set(day.items.map((i) => i.product_id));
+  const items = prodProducts(day)
+    .filter((p) => inDay.has(p.id) || (state.prod.loaves[p.id] || 0) > 0)
+    .map((p) => ({ product_id: p.id, capacity: state.prod.loaves[p.id] || 0 }));
+  await call(`/api/admin/bake-days/${day.id}`, { method: 'PUT', body: { items } });
+  toast(t('applied'), 'success');
+  state.allDays = await call('/api/admin/bake-days?scope=all');
+  renderView();
+}
+
 // ---------- events ----------
 function closeSheets() {
   state.editing = null;
   state.editingDay = null;
+  state.editingRecipe = null;
   sheetRoot.innerHTML = '';
   document.body.style.overflow = '';
 }
@@ -576,6 +819,7 @@ document.addEventListener('click', async (e) => {
     if (act === 'lang') {
       captureProductForm();
       captureDayForm();
+      captureRecipeForm();
       i18n.toggle();
     } else if (act === 'tab') {
       state.tab = el.dataset.tab;
@@ -608,6 +852,42 @@ document.addEventListener('click', async (e) => {
       state.sheetDayId = null;
       closeSheets();
       await loadTab();
+    } else if (act === 'edit-recipe') {
+      if (!state.products.length) state.products = await call('/api/admin/products');
+      if (!state.recipes.length) state.recipes = await call('/api/admin/recipes');
+      openRecipeEditor(Number(el.dataset.id));
+    } else if (act === 'add-ing') {
+      captureRecipeForm();
+      state.editingRecipe.ingredients.push({ kind: 'other', name_en: '', name_ar: '', pct: 0 });
+      renderRecipeSheet();
+    } else if (act === 'rm-ing') {
+      captureRecipeForm();
+      state.editingRecipe.ingredients.splice(Number(el.dataset.idx), 1);
+      renderRecipeSheet();
+    } else if (act === 'delete-recipe') {
+      if (!confirm(t('confirm_delete_recipe'))) return;
+      await call(`/api/admin/recipes/${state.editingRecipe.product_id}`, { method: 'DELETE' });
+      closeSheets();
+      await loadTab();
+    } else if (act === 'prod-step') {
+      const id = Number(el.dataset.id);
+      const min = Number(document.getElementById(`loaves-${id}`)?.min) || 0;
+      state.prod.loaves[id] = Math.max(min, (state.prod.loaves[id] || 0) + Number(el.dataset.delta));
+      rerenderProduction();
+    } else if (act === 'prod-planned') {
+      const day = prodDay();
+      state.prod.loaves = Object.fromEntries(day.items.map((i) => [i.product_id, i.capacity]));
+      rerenderProduction();
+    } else if (act === 'prod-orders') {
+      const day = prodDay();
+      const extra = state.prod.extra;
+      state.prod.loaves = Object.fromEntries(day.items.map((i) => [i.product_id, i.reserved > 0 ? i.reserved + extra : 0]));
+      rerenderProduction();
+    } else if (act === 'prod-apply') {
+      el.disabled = true;
+      await applyProduction();
+    } else if (act === 'print') {
+      window.print();
     } else if (act === 'new-product') {
       state.editing = { active: true, emoji: '🍞', default_qty: 0, sort: 0 };
       renderProductSheet();
@@ -650,6 +930,10 @@ document.addEventListener('change', async (e) => {
     } else if (act === 'sheet-day') {
       state.sheetDayId = Number(el.value) || null;
       await loadTab();
+    } else if (act === 'prod-day') {
+      state.prod.dayId = Number(el.value) || null;
+      state.prod.forDay = null;
+      renderView();
     } else if (act === 'oday') {
       state.orderFilter.bakeDayId = el.value;
       await loadTab();
@@ -671,6 +955,7 @@ document.addEventListener('submit', async (e) => {
   const f = e.target;
   if (f.id === 'productForm') return saveProduct(f);
   if (f.id === 'dayForm') return saveDay(f);
+  if (f.id === 'recipeForm') return saveRecipe(f);
   if (f.id === 'settingsForm') return saveSettings(f);
   if (f.id === 'pwForm') {
     try {
@@ -682,7 +967,7 @@ document.addEventListener('submit', async (e) => {
 });
 
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && (state.editing || state.editingDay)) closeSheets();
+  if (e.key === 'Escape' && (state.editing || state.editingDay || state.editingRecipe)) closeSheets();
   if (e.key === 'Enter' && e.target.classList?.contains('bake-card')) e.target.click();
 });
 
@@ -692,6 +977,24 @@ i18n.onChange(() => {
   renderView();
   if (state.editing) renderProductSheet();
   if (state.editingDay) renderDaySheet();
+  if (state.editingRecipe) renderRecipeSheet();
+});
+
+// Live updates: recipe preview and loaf counts.
+document.addEventListener('input', (e) => {
+  const el = e.target;
+  if (el.closest?.('#recipeForm')) {
+    captureRecipeForm();
+    renderRecipePreview();
+    if (el.id === 'r_try') { const f = document.getElementById('r_try'); f.focus(); const v = f.value; f.value = ''; f.value = v; }
+    return;
+  }
+  if (el.dataset?.loaves) {
+    state.prod.loaves[Number(el.dataset.loaves)] = Math.max(0, Math.floor(Number(el.value) || 0));
+    rerenderProduction(el.id);
+  } else if (el.id === 'prod-extra') {
+    state.prod.extra = Math.max(0, Math.floor(Number(el.value) || 0));
+  }
 });
 
 boot();

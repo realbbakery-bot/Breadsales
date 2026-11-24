@@ -346,3 +346,28 @@ html[dir='rtl'] input[dir='ltr'] { text-align: right; }
 .pill-past { background: var(--bg-2); color: var(--muted); }
 .select-inline { width: auto; min-height: 40px; padding: 6px 10px; max-width: 100%; }
 @media (max-width: 560px) { .cap-row { flex-wrap: wrap; } .cap-row .prod-stock { width: auto; margin-inline-start: auto; } }
+
+/* recipes & production */
+.ing-row { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px; margin-bottom: 8px; background: var(--surface); }
+.ing-top { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.ing-top select { flex: 1; min-height: 42px; border: 1.5px solid var(--line); border-radius: 10px; background: var(--bg); padding: 6px 10px; }
+.pct-box { display: flex; align-items: center; gap: 4px; }
+.pct-box input { width: 84px; min-height: 42px; border: 1.5px solid var(--line); border-radius: 10px; background: var(--bg); padding: 6px 10px; font-weight: 700; text-align: center; }
+.ing-names { gap: 8px; }
+.ing-names .input { min-height: 40px; padding: 8px 12px; }
+@media (max-width: 480px) { .ing-names { grid-template-columns: 1fr 1fr; } }
+.dough-table { width: 100%; border-collapse: collapse; font-size: .95rem; }
+.dough-table td { padding: 6px 0; border-bottom: 1px dashed var(--line); vertical-align: top; }
+.dough-table td.g { text-align: end; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.dough-table td.muted { text-align: end; padding-inline: 10px; white-space: nowrap; }
+.kind-tag { display: inline-block; margin-inline-start: 6px; font-size: .7rem; color: var(--muted); background: var(--bg-2); border-radius: 6px; padding: 0 6px; }
+.ok-line { background: var(--sage-soft); color: var(--sage); padding: 8px 12px; border-radius: var(--radius-sm); font-weight: 600; }
+.prod-card .prod-stock { flex: none; }
+@media (max-width: 560px) { .prod-card .prod-stock { width: auto; } }
+.weigh-panel { border: 2px solid var(--wheat); }
+@media print {
+  .admin-top, .no-print, #toasts { display: none !important; }
+  body { background: #fff; color: #000; }
+  .panel { break-inside: avoid; box-shadow: none; }
+  .prod-stock input { border: 0; font-size: 1.2rem; }
+}

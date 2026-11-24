@@ -224,6 +224,14 @@ export function createApp({ dbFile, uploadsDir, adminPassword, trustProxy = fals
     return { ok: true };
   }));
 
+  route('GET', '/api/admin/recipes', requireAdmin(() => store.listRecipes()));
+  route('PUT', '/api/admin/recipes/:id', requireAdmin(async ({ req, params }) =>
+    store.saveRecipe(idParam(params.id), await readBody(req, 50_000))));
+  route('DELETE', '/api/admin/recipes/:id', requireAdmin(({ params }) => {
+    store.deleteRecipe(idParam(params.id));
+    return { ok: true };
+  }));
+
   route('GET', '/api/admin/orders', requireAdmin(({ url }) => store.listOrders({
     status: url.searchParams.get('status') || undefined,
     bakeDayId: url.searchParams.get('bake_day_id') || undefined,
