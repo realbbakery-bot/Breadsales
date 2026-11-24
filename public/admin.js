@@ -549,6 +549,7 @@ function renderSettings() {
           <div class="field"><label for="pw_new">${esc(t('new_password'))}</label><input id="pw_new" name="next" type="password" dir="ltr" autocomplete="new-password"></div>
         </div>
         <div class="row"><button class="btn btn-crust" type="submit">${esc(t('change_password'))}</button>
+          <a class="btn" href="/api/admin/export">⬇ ${esc(t('export_data'))}</a>
           <button class="btn btn-ghost" type="button" data-act="logout">${esc(t('logout'))}</button></div>
       </form>
     </div>`;

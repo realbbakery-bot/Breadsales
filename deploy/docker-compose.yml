@@ -1,0 +1,32 @@
+# One server hosting every bakery.  Usage (on the server, in this folder):
+#   cp .env.example .env   # then edit it
+#   docker compose up -d --build
+services:
+  app:
+    build: ..
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      TRUST_PROXY: "1"
+    volumes:
+      - bakery-data:/data
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - app
+
+volumes:
+  bakery-data:
+  caddy-data:
+  caddy-config:

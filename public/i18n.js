@@ -218,6 +218,7 @@ const STRINGS = {
     // recipes & production
     tab_production: 'Production',
     unit_g: 'g',
+    export_data: 'Download my data',
     recipe: 'Recipe',
     add_recipe: 'Add recipe',
     edit_recipe: 'Recipe & baker\'s math',
@@ -478,6 +479,7 @@ const STRINGS = {
 
     tab_production: 'الإنتاج',
     unit_g: 'غ',
+    export_data: 'تنزيل بياناتي',
     recipe: 'الوصفة',
     add_recipe: 'إضافة وصفة',
     edit_recipe: 'الوصفة ونِسب الخبّاز',

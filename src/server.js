@@ -1,56 +1,18 @@
 // HTTP server: serves the customer shop (/), the baker dashboard (/admin)
 // and a small JSON API. No external dependencies.
-import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { openStore, AppError } from './store.js';
+import { MIME, SECURITY_HEADERS, makeLimiter, readJsonBody, parseCookies, clientIpOf, isSecureReq } from './http.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC_DIR = path.join(ROOT, 'public');
 
-const MIME = {
-  '.html': 'text/html; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.webp': 'image/webp',
-  '.ico': 'image/x-icon',
-  '.webmanifest': 'application/manifest+json',
-};
-
-const SECURITY_HEADERS = {
-  'X-Content-Type-Options': 'nosniff',
-  'Referrer-Policy': 'same-origin',
-  'X-Frame-Options': 'DENY',
-  'Content-Security-Policy':
-    "default-src 'self'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
-    "font-src https://fonts.gstatic.com; script-src 'self'; connect-src 'self'; frame-ancestors 'none'",
-};
-
-// Simple fixed-window rate limiter (per IP + bucket).
-function makeLimiter() {
-  const hits = new Map();
-  return (key, max, windowMs) => {
-    const now = Date.now();
-    const h = hits.get(key);
-    if (!h || h.reset < now) {
-      hits.set(key, { n: 1, reset: now + windowMs });
-      if (hits.size > 5000) for (const [k, v] of hits) if (v.reset < now) hits.delete(k);
-      return true;
-    }
-    h.n += 1;
-    return h.n <= max;
-  };
-}
-
 export function createApp({ dbFile, uploadsDir, adminPassword, trustProxy = false, log = console } = {}) {
   const store = openStore(dbFile);
+  uploadsDir = path.resolve(uploadsDir);
   fs.mkdirSync(uploadsDir, { recursive: true });
   const limit = makeLimiter();
 
@@ -66,8 +28,7 @@ export function createApp({ dbFile, uploadsDir, adminPassword, trustProxy = fals
     }
   }
 
-  const clientIp = (req) =>
-    (trustProxy && String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()) || req.socket.remoteAddress || '?';
+  const clientIp = (req) => clientIpOf(req, trustProxy);
 
   function send(res, status, body, headers = {}) {
     res.writeHead(status, { ...SECURITY_HEADERS, ...headers });
@@ -77,36 +38,9 @@ export function createApp({ dbFile, uploadsDir, adminPassword, trustProxy = fals
     send(res, status, JSON.stringify(data), { 'Content-Type': MIME['.json'], 'Cache-Control': 'no-store', ...headers });
   }
 
-  function readBody(req, max) {
-    return new Promise((resolve, reject) => {
-      const ct = String(req.headers['content-type'] || '');
-      // Requiring JSON also blocks simple cross-site form posts (CSRF).
-      if (!ct.startsWith('application/json')) return reject(new AppError('json_required', 415));
-      let size = 0;
-      const chunks = [];
-      req.on('data', (c) => {
-        size += c.length;
-        if (size > max) { reject(new AppError('payload_too_large', 413)); req.destroy(); return; }
-        chunks.push(c);
-      });
-      req.on('end', () => {
-        if (!chunks.length) return resolve({});
-        try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
-        catch { reject(new AppError('invalid_json')); }
-      });
-      req.on('error', reject);
-    });
-  }
-
-  function cookies(req) {
-    const out = {};
-    for (const part of String(req.headers.cookie || '').split(';')) {
-      const i = part.indexOf('=');
-      if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
-    }
-    return out;
-  }
-  const isSecure = (req) => req.socket.encrypted || (trustProxy && req.headers['x-forwarded-proto'] === 'https');
+  const readBody = readJsonBody;
+  const cookies = parseCookies;
+  const isSecure = (req) => isSecureReq(req, trustProxy);
   function sessionCookie(req, token, maxAge) {
     return `bs_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${isSecure(req) ? '; Secure' : ''}`;
   }
@@ -203,6 +137,11 @@ export function createApp({ dbFile, uploadsDir, adminPassword, trustProxy = fals
   // Admin data
   route('GET', '/api/admin/summary', requireAdmin(({ url }) => store.summary(url.searchParams.get('bake_day_id') || undefined)));
   route('GET', '/api/admin/settings', requireAdmin(() => store.getSettings()));
+  // The baker's own data, downloadable at any time.
+  route('GET', '/api/admin/export', requireAdmin(({ res }) => {
+    res.setHeader('Content-Disposition', `attachment; filename="bakery-export-${new Date().toISOString().slice(0, 10)}.json"`);
+    return store.exportAll();
+  }));
   route('PUT', '/api/admin/settings', requireAdmin(async ({ req }) => store.updateSettings(await readBody(req, 10_000))));
 
   route('GET', '/api/admin/products', requireAdmin(() => store.listProducts({ includeInactive: true })));
@@ -312,20 +251,4 @@ export function createApp({ dbFile, uploadsDir, adminPassword, trustProxy = fals
   }
 
   return { handler, store, getSetupCode: () => setupCode };
-}
-
-// Run directly: `npm start`
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const dataDir = path.resolve(process.env.DATA_DIR || path.join(ROOT, 'data'));
-  const app = createApp({
-    dbFile: path.join(dataDir, 'bakery.db'),
-    uploadsDir: path.join(dataDir, 'uploads'),
-    adminPassword: process.env.ADMIN_PASSWORD,
-    trustProxy: process.env.TRUST_PROXY === '1',
-  });
-  const port = Number(process.env.PORT) || 3000;
-  http.createServer(app.handler).listen(port, () => {
-    console.log(`[breadsales] Shop:      http://localhost:${port}/`);
-    console.log(`[breadsales] Dashboard: http://localhost:${port}/admin`);
-  });
 }

@@ -41,20 +41,16 @@ If you start without `ADMIN_PASSWORD`, the server prints a one-time **setup code
 |---|---|---|
 | `PORT` | `3000` | HTTP port |
 | `DATA_DIR` | `./data` | Where the SQLite database and uploaded photos live. **Back this folder up.** |
-| `ADMIN_PASSWORD` | – | Sets the dashboard password on first start |
+| `ADMIN_PASSWORD` | – | Single-bakery mode: sets the dashboard password on first start |
+| `OWNER_PASSWORD` | – | Turns on multi-bakery hosting and protects the owner console |
 | `TRUST_PROXY` | – | Set to `1` behind a hosting proxy (Render, Railway, Fly) so rate limits and secure cookies work |
 | `TZ` | server's | Set to your timezone, e.g. `Asia/Riyadh`, so "today" and pickup dates are correct |
 
-## Hosting
+## Hosting many bakeries under their own names
 
-The app must run on a server so that every customer sees the same stock. Any host that runs Node and has a **persistent disk** works, for example:
+Set `OWNER_PASSWORD` and the same server hosts any number of bakeries, each on its own domain, with fully separate data. A private owner console lets you add bakeries, connect domains, reset passwords, suspend and back up. **See [docs/HOSTING.md](docs/HOSTING.md)** for the step-by-step server setup (Docker + Caddy, automatic HTTPS) and the checklist for onboarding each baker.
 
-- Render with a disk
-- Railway with a volume
-- Fly.io with a volume
-- a small VPS
-
-Point `DATA_DIR` at the persistent disk. Free tiers that wipe the disk on every restart will lose your orders.
+Without `OWNER_PASSWORD` the app runs as a single bakery, as in **Run it** above. That is handy for trying it locally.
 
 ## Defaults to change in Settings
 
