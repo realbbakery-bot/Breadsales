@@ -88,6 +88,15 @@ test('rejects non-JSON posts (CSRF guard) and serves pages', async () => {
   assert.equal((await fetch(base + '/uploads/..%2f..%2fpackage.json')).status, 404);
 });
 
+test('shared link previews show the bakery\'s own name, not a generic title', async () => {
+  app.store.updateSettings({ shop_name_en: "Sarah's Bakery", shop_name_ar: 'مخبز سارة', tagline_en: 'Sourdough <every> Friday' });
+  const html = await (await fetch(base + '/')).text();
+  assert.match(html, /<title>مخبز سارة · Sarah&#39;s Bakery<\/title>/);
+  assert.match(html, /<meta property="og:title" content="مخبز سارة · Sarah&#39;s Bakery">/);
+  assert.match(html, /Sourdough &lt;every&gt; Friday/, 'tagline is escaped');
+  assert.doesNotMatch(html, /<title>Bakery<\/title>/);
+});
+
 test('login rate limiting kicks in', async () => {
   let last;
   for (let i = 0; i < 12; i++) last = await req('POST', '/api/admin/login', { password: 'nope' });

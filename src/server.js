@@ -253,6 +253,32 @@ export function createApp({ dbFile, uploadsDir, adminPassword, trustProxy = fals
     return { url: `/uploads/${name}` };
   }));
 
+  // The shop page is served with the bakery's own name, tagline and a product photo baked into
+  // <title> and Open Graph tags, so link previews on WhatsApp / Instagram / TikTok show the
+  // baker's brand (those previewers don't run JavaScript).
+  const escHtml = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  async function serveShop(req, res) {
+    const template = await fs.promises.readFile(path.join(PUBLIC_DIR, 'index.html'), 'utf8');
+    const st = store.getSettings();
+    const title = [...new Set([st.shop_name_ar, st.shop_name_en].filter(Boolean))].join(' · ') || 'Bakery';
+    const desc = [...new Set([st.tagline_ar, st.tagline_en].filter(Boolean))].join(' — ');
+    const host = String(req.headers.host || '').replace(/[^\w.:-]/g, '');
+    const origin = `${isSecure(req) ? 'https' : 'http'}://${host}`;
+    const photo = store.listProducts().find((p) => p.image_url)?.image_url;
+    const image = photo ? (photo.startsWith('http') ? photo : origin + photo) : '';
+    const meta = [
+      `<title>${escHtml(title)}</title>`,
+      desc && `<meta name="description" content="${escHtml(desc)}">`,
+      '<meta property="og:type" content="website">',
+      `<meta property="og:title" content="${escHtml(title)}">`,
+      desc && `<meta property="og:description" content="${escHtml(desc)}">`,
+      host && `<meta property="og:url" content="${escHtml(origin + '/')}">`,
+      image && `<meta property="og:image" content="${escHtml(image)}">`,
+      `<meta name="twitter:card" content="${image ? 'summary_large_image' : 'summary'}">`,
+    ].filter(Boolean).join('\n  ');
+    send(res, 200, template.replace('<title>Bakery</title>', meta), { 'Content-Type': MIME['.html'], 'Cache-Control': 'no-cache' });
+  }
+
   // ---------- handler ----------
   async function handler(req, res) {
     const url = new URL(req.url, 'http://local');
@@ -274,7 +300,7 @@ export function createApp({ dbFile, uploadsDir, adminPassword, trustProxy = fals
         const f = safeJoin(uploadsDir, p.slice('/uploads/'.length));
         return f ? serveFile(res, f, 'public, max-age=31536000, immutable') : send(res, 404, 'Not found');
       }
-      if (p === '/' || p === '/index.html') return serveFile(res, path.join(PUBLIC_DIR, 'index.html'), 'no-cache');
+      if (p === '/' || p === '/index.html') return await serveShop(req, res);
       if (p === '/admin' || p === '/admin/') return serveFile(res, path.join(PUBLIC_DIR, 'admin.html'), 'no-cache');
       const f = safeJoin(PUBLIC_DIR, p);
       return f ? serveFile(res, f, 'no-cache') : send(res, 404, 'Not found');
